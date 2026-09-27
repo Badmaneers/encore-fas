@@ -20,9 +20,9 @@ static const char *const kQueueBufferSymbols[] = {
 };
 
 /**
- * @brief Prints the command list to stderr.
+ * @brief Prints CLI usage help to stderr.
  *
- * @param argv0 The program name.
+ * @param argv0 Program name string.
  */
 static void print_usage(const char *argv0) {
     fprintf(stderr,
@@ -46,15 +46,15 @@ static void print_usage(const char *argv0) {
 }
 
 /**
- * @brief Reads the target options and the frame rate list.
+ * @brief Parses target options and frame rate arguments.
  *
- * @param argc The number of arguments after the command name.
- * @param argv The arguments after the command name.
- * @param cfg The structure that receives the configuration.
- * @param lib The variable that receives the -l value. This parameter can be NULL.
- * @param offset The variable that receives the -o value. This parameter can be NULL.
- * @param have_offset The variable that is set when the user gave -o. This parameter can be NULL.
- * @return 0 on success. Otherwise -1.
+ * @param argc Argument count.
+ * @param argv Argument string array.
+ * @param cfg Configuration structure to populate.
+ * @param lib Output pointer for library path (-l option).
+ * @param offset Output pointer for file offset (-o option).
+ * @param have_offset Output flag set if -o option was specified.
+ * @return 0 on success, or -1 on parse failure.
  */
 static int parse_targets(int argc, char **argv, struct fas_config *cfg, const char **lib, uint64_t *offset, int *have_offset) {
     uint32_t fps[FAS_MAX_TARGETS];
@@ -105,12 +105,12 @@ static int cmd_version(int fd) {
 }
 
 /**
- * @brief Attaches a listener to a process and prints the listener ID.
+ * @brief Attaches listener to target process and outputs assigned ID.
  *
- * @param fd The file descriptor of the FAS device.
- * @param argc The number of arguments after the command name.
- * @param argv The arguments after the command name.
- * @return 0 on success. Otherwise 1.
+ * @param fd File descriptor of FAS device.
+ * @param argc Argument count.
+ * @param argv Argument string array.
+ * @return 0 on success, or 1 on failure.
  */
 static int cmd_attach(int fd, int argc, char **argv) {
     struct fas_config cfg;
@@ -208,12 +208,12 @@ static int cmd_list(int fd) {
 }
 
 /**
- * @brief Prints events until the read fails or the count ends.
+ * @brief Monitors and prints event stream.
  *
- * @param fd The file descriptor of the FAS device.
- * @param argc The number of arguments after the command name.
- * @param argv The arguments after the command name.
- * @return 0 after the count ends. Otherwise 1.
+ * @param fd File descriptor of FAS device.
+ * @param argc Argument count.
+ * @param argv Argument string array.
+ * @return 0 when complete, or 1 on error.
  */
 static int cmd_listen(int fd, int argc, char **argv) {
     struct fas_event ev[8];
@@ -252,11 +252,11 @@ static int cmd_listen(int fd, int argc, char **argv) {
 }
 
 /**
- * @brief Runs the command from the command line.
+ * @brief CLI entry point.
  *
- * @param argc The number of command-line arguments.
- * @param argv The command-line arguments.
- * @return 0 on success. Otherwise 1.
+ * @param argc Command-line argument count.
+ * @param argv Command-line argument vector.
+ * @return 0 on success, or 1 on failure.
  */
 int main(int argc, char **argv) {
     if (argc < 2) {

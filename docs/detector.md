@@ -1,19 +1,19 @@
 # Encore FAS Frame Interval Detector
 
-This document describes the detector algorithm of the Encore FAS kernel module.
-The detector reads the time of each frame and reports events to a user-space daemon.
-The file kernel/encore_fas_det.h is the source of truth.
+This document describes the detector algorithm in the Encore FAS kernel module.
+The detector reads the timestamp of each frame and sends events to a user-space daemon.
+The file encore_fas_det.h contains the primary source code.
 
 ## 1. Scope
 
-1. The input is the time of each call to `Surface::queueBuffer` in one game process.
-2. Time is a tick count of the arm64 virtual counter (`CNTVCT_EL0`). All durations in this document are in ticks. Event timestamps use `CLOCK_MONOTONIC` in nanoseconds.
-3. The daemon supplies 1 to 8 legal frame rates. The daemon can also supply the display vsync period and a lock flag.
-4. The detector does not learn a baseline from the frame stream. The target list alone defines healthy output.
-5. The detector reports events only. The daemon decides the CPU and GPU boost policy.
-6. All calculations use integer arithmetic.
-7. One detector instance (a listener) serves one game process. The detector sees one frame stream per listener. Frames from several surfaces mix into that stream.
-8. The vsync period stays constant until the next configuration.
+1. Input data is the timestamp of each `Surface::queueBuffer` call in one game process.
+2. Time values use ticks from the arm64 virtual counter (`CNTVCT_EL0`). All durations in this document use ticks. Event timestamps use `CLOCK_MONOTONIC` in nanoseconds.
+3. The daemon configures 1 to 8 target frame rates. The daemon can also set the display vsync period and a lock flag.
+4. The detector does not learn a baseline from the frame stream. The target list defines normal performance.
+5. The detector sends events only. The daemon sets CPU and GPU frequency policies.
+6. All operations use integer arithmetic.
+7. One detector instance (a listener) handles one game process. The detector processes one frame stream per listener. Frames from multiple surfaces mix into this stream.
+8. The vsync period remains constant until reconfigured.
 
 ## 2. Notation
 
@@ -21,18 +21,18 @@ The file kernel/encore_fas_det.h is the source of truth.
 
 | Term | Meaning |
 | ----- | ----- |
-| Interval | The time between two consecutive frames. |
-| Target | A legal frame rate from the target list. |
-| Active target | The target that the detector uses now. |
-| Period | The ideal interval of a target. |
-| Slot | One period of time in which the game must queue one frame. |
-| Hitch | An interval that is at least one slot longer than the reference interval, after the margin. |
-| Missed slots | The number of slots that a hitch loses. |
-| Deficit | A sustained mean interval that is longer than the active period by more than the tolerance. |
-| Window | A time span over which the detector calculates the mean interval. |
-| Tolerance | The deficit that the detector accepts. It is 5% of the period. |
-| Margin | The extra time that an interval can use before it is a hitch. |
-| Listener | The detector state for one game process. |
+| Interval | Time duration between two consecutive frames. |
+| Target | Valid frame rate from the target list. |
+| Active target | Currently selected target frame rate. |
+| Period | Nominal frame interval for a target. |
+| Slot | Required time period to process and queue one frame. |
+| Hitch | Frame interval exceeding reference interval plus margin by at least one slot. |
+| Missed slots | Number of frame slots lost during a hitch. |
+| Deficit | Sustained average interval exceeding active period beyond tolerance limit. |
+| Window | Measurement duration used to calculate average frame interval. |
+| Tolerance | Accepted interval deficit limit (5% of target period). |
+| Margin | Allowed threshold addition before classifying frame as a hitch. |
+| Listener | Detector state context assigned to one game process. |
 
 ### 2.2 Symbols
 
@@ -54,6 +54,10 @@ The file kernel/encore_fas_det.h is the source of truth.
 | $m_i$ | Missed slots of interval $i$ | count |
 | $x_i$ | Normalized excess of interval $i$ | Q16 |
 | $S$ | CUSUM value | Q16 |
+| $q$ | Tracked quantile of the interval's one-sided lateness | ticks, Q16 |
+| $\tau$ | Target quantile of $q$, 0.9995 | ratio |
+| $\gamma$ | Quantile step size, $a / 4$ | ticks, Q16 |
+| $late$ | One-sided lateness, $\max(d-c,\ 0)$ | ticks |
 | $\epsilon$ | Tolerance, 0.05 | ratio |
 | $h$ | CUSUM alarm limit, 1.0 | ratio |
 | $W$ | Window length | ticks |
@@ -62,7 +66,7 @@ The file kernel/encore_fas_det.h is the source of truth.
 | $\rho_w$ | $\mu_w / P$ | Q16 |
 | $T_{soft}$, $T_{hard}$, $T_{pause}$ | Watchdog delays | ticks |
 
-Q16 is a fixed-point number with 16 fractional bits. The value $1.0$ is $65536$.
+Q16 represents a fixed-point number with 16 fractional bits. The value 1.0 equals 65536.
 
 ## 3. Configuration
 
@@ -70,29 +74,29 @@ Q16 is a fixed-point number with 16 fractional bits. The value $1.0$ is $65536$.
 
 | Input | Meaning |
 | ----- | ----- |
-| `fps[]`, `count` | The legal frame rates. |
-| `vsync_ns` | The display vsync period in nanoseconds. Zero selects the default. |
-| `FAS_CFG_LOCK_DOWN` | Forbids a switch to a slower target. |
+| `fps[]`, `count` | Array and count of target frame rates. |
+| `vsync_ns` | Display vsync period in nanoseconds (0 selects default value). |
+| `FAS_CFG_LOCK_DOWN` | Flag to disable switching to lower frame rates. |
 
 ### 3.2 Validation
 
-The module rejects a configuration with `-EINVAL` if one of these conditions is true:
+The module returns `-EINVAL` and rejects configuration if any condition is met:
 
-1. `count` is 0 or more than 8.
-2. A rate is 0 or more than 1000.
-3. `flags` has a bit other than `FAS_CFG_LOCK_DOWN`.
-4. `vsync_ns` is not 0 and its period in ticks is less than $F / 1000$ or more than $F / 10$.
-5. Two adjacent periods (after sorting) are less than 12% apart:
+1. `count` equals 0 or exceeds 8.
+2. Frame rate equals 0 or exceeds 1000 fps.
+3. `flags` contains bits other than `FAS_CFG_LOCK_DOWN`.
+4. `vsync_ns` is non-zero and tick period is less than $F / 1000$ or greater than $F / 10$.
+5. Sorted adjacent periods differ by less than 12%:
 
 $$
 100 P_{k+1} < 112 P_k
 $$
 
-A rejected configuration changes no state.
+A rejected configuration does not change detector state.
 
 ### 3.3 Derived Settings
 
-The detector sorts the rates from fastest to slowest. Target 0 is the fastest. For each target:
+The detector sorts frame rates from fastest to slowest. Target 0 is the fastest target. For each target $k$:
 
 $$
 P_k = \left\lfloor \frac{F + \lfloor f_k / 2 \rfloor}{f_k} \right\rfloor
@@ -100,52 +104,54 @@ P_k = \left\lfloor \frac{F + \lfloor f_k / 2 \rfloor}{f_k} \right\rfloor
 B_k = \left\lfloor \frac{5 P_k}{100} \right\rfloor
 $$
 
-The detector also sets these values:
+The detector calculates initial parameters:
 
 | Value | Definition |
 | ----- | ----- |
-| $V$ | The supplied vsync period. If none, $P_0$. |
-| $W_{min}$ | $F / 4$ (250 ms). |
-| $T_{pause}$ | $\max(F, 10 P_{n-1})$, where $P_{n-1}$ is the slowest period. |
-| Active target | Target 0, until acquisition selects one. |
-| $W$ | $\max(W_{min}, 8P)$. It follows the active target. |
+| $V$ | Specified vsync period, or $P_0$ if omitted. |
+| $W_{min}$ | Minimum window duration $F / 4$ (250 ms). |
+| $T_{pause}$ | Pause threshold $\max(F, 10 P_{n-1})$ where $P_{n-1}$ is slowest period. |
+| Active target | Default target 0 until acquisition completes. |
+| $W$ | Target window length $\max(W_{min}, 8P)$, adjusted to active target. |
 
-The band of target $k$ is $[P_k - B_k, P_k + B_k]$. The bands of two targets never overlap, because $P_{k+1} / P_k \ge 1.12$ and the bands overlap only if the ratio is at most $1.105$.
+Target band $k$ is $[P_k - B_k, P_k + B_k]$. Target bands do not overlap because $P_{k+1} / P_k \ge 1.12$ and overlap requires ratio $\le 1.105$.
 
-### 3.4 Meaning of the List
+### 3.4 Target List Purpose
 
-Operation at any listed rate is healthy. A game that must keep one rate needs a list with one entry. A list with several entries lets the detector follow the game between tiers.
+Operation at any listed target rate indicates normal performance. Single-rate applications use a list with one entry. Multi-rate lists allow the detector to adapt across performance tiers.
 
-The lock flag stops a switch to a slower target. With the lock, a game that drops to a slower listed rate stays degraded.
+The lockdown flag prevents switching to lower target rates. When locked, frame rate drops below the active target set the degraded state.
 
-### 3.5 Reset
+### 3.5 Detector Reset
 
-A new configuration and the first registration reset the detector:
+New configuration calls and initial registration reset the detector state:
 
-1. Set all state to zero.
-2. Set `acquiring` to 1.
-3. Set `pending` to none.
-4. Set the watchdog stage to `IDLE`.
+1. Clear all state fields to 0.
+2. Set `acquiring` flag to 1.
+3. Set `pending` target index to none (`FAS_NONE`).
+4. Set watchdog stage to `IDLE`.
 
-A new configuration keeps the event sequence number `seq`.
+New configurations preserve the event sequence counter `seq`.
 
 ## 4. State
 
 | Variable | Meaning |
 | ----- | ----- |
-| `last` | Time of the last frame. |
-| `have_last` | The detector has seen one frame. |
-| `acquiring` | The detector has not selected its first active target. |
-| `win_start`, `win_n` | Start time and interval count of the current window. |
-| `c_q4` | $16c$. |
-| `a_q4` | $16a$. |
-| `S` | The CUSUM value in Q16. |
-| `degraded` | The game is slower than the active target. |
-| `paused` | The watchdog reported a pause. |
-| `wd_stage` | `ARMED`, `SOFT_SENT`, `HARD_SENT` or `IDLE`. |
-| `ok_windows` | Consecutive clean windows. |
-| `pending`, `pending_n` | Candidate target for a rate switch, and the number of consecutive windows that match it. |
-| `seq` | Sequence number of the last event. |
+| `last` | Timestamp of previous frame. |
+| `have_last` | Set to 1 when initial frame is received. |
+| `acquiring` | Set to 1 while selecting initial target rate. |
+| `win_start`, `win_n` | Start timestamp and interval count of current window. |
+| `c_q4` | Moving average interval scaled by 16 ($16c$). |
+| `a_q4` | Moving mean absolute deviation scaled by 16 ($16a$). |
+| `q` | Quantile threshold value in Q16 format. |
+| `q_n` | Normal update count for quantile tracker (maximum `FAS_QUANT_WARMUP`). |
+| `S` | CUSUM deficit metric in Q16 format. |
+| `degraded` | Set to 1 when frame rate is below active target. |
+| `paused` | Set to 1 when watchdog detects frame pause. |
+| `wd_stage` | Watchdog stage (`ARMED`, `SOFT_SENT`, `HARD_SENT`, or `IDLE`). |
+| `ok_windows` | Count of consecutive normal windows. |
+| `pending`, `pending_n` | Candidate target index and matching window count. |
+| `seq` | Listener event sequence counter. |
 
 ## 5. Structure
 
@@ -194,45 +200,45 @@ watchdog timer (restarted at each frame) --> BOOST_SOFT, BOOST_HARD, PAUSED
                      +---------+
 ```
 
-The `PAUSED` state clears the `DEGRADED` state. If the game is still slow after the pause, the CUSUM raises a new alarm.
+The `PAUSED` state clears the `DEGRADED` state. If frame rate remains low after resuming, the CUSUM triggers a new `DEGRADED` alarm.
 
 ## 6. Frame Procedure
 
-The detector runs this procedure for each frame with time $t$. The procedure returns the delay of the watchdog timer. A return value of 0 means that the timer stays as it is.
+The detector executes this procedure for each frame timestamp $t$. The function returns watchdog timer delay ticks. A return value of 0 leaves the timer unchanged.
 
-1. If `have_last` is 0, set `have_last` and `acquiring` to 1. Set `last` and `win_start` to $t$. Set `win_n` to 0. Return 0.
-2. Calculate $d = t - \texttt{last}$. If $d \le 0$, discard the frame and return 0. Two CPUs can read the counter in the opposite order of their lock order.
+1. If `have_last` equals 0, set `have_last` and `acquiring` to 1. Set `last` and `win_start` to $t$. Set `win_n` to 0. Return 0.
+2. Calculate $d = t - \texttt{last}$. If $d \le 0$, discard frame and return 0. (Handles out-of-order counter reads across CPUs).
 3. Set `last` to $t$.
-4. If `paused` is 1 or $d \ge T_{pause}$, run the resync procedure (Section 11). Return 0 if `acquiring` is 1. Otherwise return $T_{soft}$.
-5. If `acquiring` is 1:
+4. If `paused` equals 1 or $d \ge T_{pause}$, execute resync procedure (Section 11). Return 0 if `acquiring` equals 1, otherwise return $T_{soft}$.
+5. If `acquiring` equals 1:
    1. Increment `win_n`.
    2. If $t - \texttt{win\_start} < W_{min}$, return 0.
-   3. Run the acquisition procedure (Section 7). Return $T_{soft}$.
-6. Set the event flag `FAS_EVF_WATCHDOG` if `wd_stage` is not `ARMED`. Set `wd_stage` to `ARMED`.
+   3. Execute acquisition procedure (Section 7). Return $T_{soft}$.
+6. Set `FAS_EVF_WATCHDOG` event flag if `wd_stage` is not `ARMED`. Set `wd_stage` to `ARMED`.
 7. Calculate $R$ and $H$ (Section 8).
-8. If $d \ge R + H$, run the hitch procedure (Section 9). Otherwise update $c$ and $a$ (Section 8.3).
-9. If `degraded` is 0, add $d$ to the CUSUM (Section 10). If the CUSUM alarms, emit `DEGRADED`. Set `degraded` to 1 and $S$ to 0.
-10. Increment `win_n`. If $t - \texttt{win\_start} \ge W$, run the window procedure (Section 12).
-11. Return $T_{soft}$, calculated from the state after steps 7 to 10.
+8. If $d \ge R + H$, execute hitch procedure (Section 9). Otherwise update $c$ and $a$ (Section 8.3).
+9. If `degraded` equals 0, add $d$ to CUSUM (Section 10). If CUSUM reaches alarm threshold, emit `DEGRADED`, set `degraded` to 1, and set $S$ to 0.
+10. Increment `win_n`. If $t - \texttt{win\_start} \ge W$, execute window procedure (Section 12).
+11. Return $T_{soft}$ based on updated state parameters.
 
-A frame can produce at most 4 events. The detector discards events after the fourth.
+Single frame evaluations output at most 4 events. The detector drops extra events exceeding 4.
 
 ## 7. Acquisition
 
-Acquisition selects the first active target from one window of frames.
+Acquisition selects the initial active target using one frame measurement window.
 
-1. The first frame gives no interval and only starts the window (Section 6, step 1).
-2. Each later frame adds one interval. Let $n$ be the number of intervals.
-3. When $t - \texttt{win\_start} \ge W_{min}$, calculate $\mu = \lfloor (t - \texttt{win\_start}) / n \rfloor$.
-4. If $\mu$ is in the band of target $k$, select target $k$.
-5. Otherwise, select the target with the largest period that is not more than $\mu$. If all periods are more than $\mu$, select target 0.
+1. Initial frame starts measurement window without calculating interval (Section 6, step 1).
+2. Subsequent frames record frame intervals $n$.
+3. When $t - \texttt{win\_start} \ge W_{min}$, calculate mean interval $\mu = \lfloor (t - \texttt{win\_start}) / n \rfloor$.
+4. If $\mu$ falls inside target band $k$, select target $k$.
+5. Otherwise select target with largest period $\le \mu$. If all target periods exceed $\mu$, select target 0.
 6. Set `acquiring` to 0 and `wd_stage` to `ARMED`.
-7. Run the switch procedure (Section 12.3). This emits `RATE_SWITCH`.
+7. Execute rate switch procedure (Section 12.3) to emit `RATE_SWITCH`.
 8. Set `win_start` to `last` and `win_n` to 0.
 
-Step 5 assumes that a game between two listed rates aims at the faster rate and fails to reach it. The CUSUM then reports `DEGRADED`.
+Step 5 handles frame rates between targets by selecting the faster rate target. CUSUM tracking reports subsequent performance deficits as `DEGRADED`.
 
-The watchdog emits no event while `acquiring` is 1.
+Watchdog timer events are suppressed while `acquiring` equals 1.
 
 ## 8. Reference Interval and Margin
 
@@ -242,21 +248,23 @@ $$
 R = \min\bigl(\max(P, c),\ 2P\bigr)
 $$
 
-$R$ follows the recent interval of the game. It is never less than $P$ and never more than $2P$. The deficit detector always uses $P$. A rise of $R$ therefore cannot hide a deficit.
+$R$ tracks recent frame intervals. Values are clamped between $P$ and $2P$. Deficit detection uses $P$ directly, so increases in $R$ do not mask frame deficits.
 
 ### 8.2 Margin
 
 $$
-H = \min\bigl(\max(V / 2,\ N a),\ R\bigr) \qquad N = 6
+H = \min\bigl(\max(V / 2,\ q),\ R\bigr)
 $$
 
-1. The floor $V / 2$ is halfway between an interval on time and an interval one vsync late.
-2. The term $N a$ follows the noise of the intervals.
-3. The cap $R$ keeps the hitch threshold below $2R$.
+1. Minimum threshold $V / 2$ represents half a vsync frame duration.
+2. Parameter $q$ (Section 8.4) tracks the $\tau$ quantile of frame lateness. This maintains stable false hitch rates across arbitrary noise distributions.
+3. Maximum cap $R$ keeps hitch detection threshold below $2R$.
+
+Before collecting `FAS_QUANT_WARMUP` normal samples, the detector uses fallback margin $\min(\max(V/2,\ Na),\ R)$ with multiplier $N = 6$. Warmup requires several thousand samples to stabilize $q$ values after registration or target switches.
 
 ### 8.3 Update
 
-The detector updates $c$ and $a$ only with intervals that are not hitches. It uses $c$ before the update to calculate the deviation.
+The detector updates cadence $c$ and deviation $a$ using normal frames only. It calculates deviation using $c$ prior to updating:
 
 $$
 dev = \min(\lvert d - c \rvert,\ V)
@@ -268,13 +276,57 @@ a \leftarrow a + \frac{dev - a}{16}
 c \leftarrow c + \frac{d - c}{8}
 $$
 
-The cap $V$ limits the effect of the short catch-up intervals after a burst hitch.
+Cap value $V$ prevents catch-up frames from distorting moving deviation averages.
 
-Initial values: the switch and resync procedures set $c = P$. The setup procedure sets $a = 0$. A switch does not change $a$.
+Initial parameters: Target switches and resync reset $c = P$. Setup initializes $a = 0$. Target switches preserve $a$.
+
+### 8.4 Quantile Tracker
+
+Quantile parameter $q$ directly tracks the $\tau$ quantile of upper frame lateness $late$:
+
+$$
+late = \max(d - c,\ 0)
+$$
+
+Lateness $late$ measures positive delay above average cadence. Flooring negative differences at zero prevents post-hitch catch-up intervals from artificially increasing noise deviation estimates.
+
+Quantile $q$ updates on each normal frame via Robbins-Monro approximation:
+
+$$
+\gamma = \frac{a}{2^{2}}
+$$
+
+$$
+q \leftarrow
+\begin{cases}
+q + \gamma \tau & late > q \\
+q - \gamma (1 - \tau) & late \le q
+\end{cases}
+\qquad \tau = 0.9995
+$$
+
+Step size $\gamma$ scales with deviation $a$. This provides consistent step sizing across different target frame rates.
+
+**Quantile Convergence.** At target quantile $\tau$, sample proportions at or below threshold equal $\tau$ while exceedances equal $1 - \tau$. The expected step value equals zero:
+
+$$
+E[\Delta q] = (1 - \tau) \cdot \gamma \tau + \tau \cdot \bigl(-\gamma (1 - \tau)\bigr) = 0
+$$
+
+The update equilibrium holds for any interval distribution.
+
+**Tracking Behavior.** Fixed step sizes oscillate around equilibrium, stepping up by $\gamma \tau$ on exceedances and stepping down by $\gamma (1 - \tau)$ otherwise. Over long runs, realized hitch rates match nominal target $1 - \tau$. Test sweeps across 25 random seeds verified average `SMALL_JANK` counts match nominal targets within 10% to 15%. Target quantile $\tau = 0.9995$ provides margin stability across variable test trace distributions.
+
+**Trade-offs.** Non-parametric quantile tracking introduces two specific requirements:
+
+1. **Warmup Period.** Exceedances occur once per $1 / (1 - \tau)$ normal frames. The tracker requires `FAS_QUANT_WARMUP` (4096 frames) to establish stable threshold estimates. Section 8.2 uses fallback margin $Na$ during warmup.
+2. **Step Sizing.** Parameter $\gamma$ balances adaptation speed against threshold variance. Shift value `FAS_QUANT_STEP_SHIFT = 2` balances rapid response against run-to-run threshold stability.
+
+Quantile $q$ persists across rate switches and resync calls, maintaining rendering pipeline noise estimates.
 
 ## 9. Hitch Detector
 
-An interval is a hitch when $d \ge R + H$. The number of missed slots is:
+Frame intervals meeting $d \ge R + H$ trigger hitch events. Missed slot count $m$:
 
 $$
 m = \left\lfloor \frac{d - H}{R} \right\rfloor \qquad (m \ge 1)
@@ -282,16 +334,16 @@ $$
 
 | Missed slots | Event | Rule |
 | ----- | ----- | ----- |
-| $1 \le m \le 2$ | `SMALL_JANK` | Suppressed while `degraded` is 1. |
-| $m \ge 3$ | `BIG_JANK` | Always emitted. |
+| $1 \le m \le 2$ | `SMALL_JANK` | Suppressed while `degraded` equals 1. |
+| $m \ge 3$ | `BIG_JANK` | Always generated. |
 
-The event carries $d$, $\min(m, 65535)$ and the flag from Section 6, step 6.
+Hitch event records contain interval duration $d$, slot loss count $\min(m, 65535)$, and watchdog flags.
 
-### 9.1 Thresholds
+### 9.1 Threshold Reference
 
-The values below assume low noise, that is $H = V / 2$. The big hitch threshold is $3R + H$.
+Values below assume minimum noise margin $H = V / 2$. Large hitch threshold equals $3R + H$.
 
-| Target | $V$ | $H$ | Hitch at $d \ge$ | Big hitch at $d \ge$ |
+| Target | $V$ | $H$ | Hitch threshold ($d \ge$) | Large hitch threshold ($d \ge$) |
 | ----- | ----- | ----- | ----- | ----- |
 | 30 fps | 16.67 ms | 8.33 ms | 41.7 ms | 108.3 ms |
 | 60 fps | 16.67 ms | 8.33 ms | 25.0 ms | 58.3 ms |
@@ -301,7 +353,7 @@ The values below assume low noise, that is $H = V / 2$. The big hitch threshold 
 
 ## 10. Deficit Detector
 
-The deficit detector is a one-sided CUSUM chart. It runs only while `degraded` is 0.
+The deficit detector uses a one-sided CUSUM algorithm. CUSUM tracking executes while `degraded` equals 0.
 
 $$
 x_i = \frac{\min(d_i,\ 1.5P) - P}{P} \quad \text{(Q16)}
@@ -311,50 +363,50 @@ $$
 S_i = \max(0,\ S_{i-1} + x_i - \epsilon)
 $$
 
-The detector raises an alarm when $S_i \ge h$. On alarm, it emits `DEGRADED`, sets `degraded` to 1 and sets $S$ to 0. The window estimator ends the `DEGRADED` state (Section 12.2).
+The detector triggers an alarm when $S_i \ge h$. Upon alarm, it emits `DEGRADED`, sets `degraded` to 1, and resets $S$ to 0. The window estimator clears `degraded` state (Section 12.2).
 
-| Parameter | Effect |
+| Parameter | Function |
 | ----- | ----- |
-| $\epsilon = 0.05$ | Excess below the tolerance does not accumulate. |
-| $h = 1.0$ | The alarm needs a total excess of one slot above the tolerance. |
-| Upper clip $1.5P$ | One interval adds at most $0.5 - \epsilon = 0.45$ to $S$. One or two hitches cannot alarm. Three can. |
-| Lower bound $-1.0$ | It follows from $d > 0$. One interval lowers $S$ by at most $1.0 + \epsilon$. |
+| $\epsilon = 0.05$ | Frame delay excess below tolerance limit does not accumulate. |
+| $h = 1.0$ | Alarm requires cumulative deficit of one frame slot above tolerance. |
+| Upper clip $1.5P$ | Single intervals add at most $0.5 - \epsilon = 0.45$ to $S$. Prevents 1 or 2 isolated hitches from alarming. |
+| Lower bound $-1.0$ | Interval lower limit based on $d > 0$. Single intervals reduce $S$ by at most $1.0 + \epsilon$. |
 
-### 10.1 Pressure
+### 10.1 Deficit Pressure
 
-The pressure of a listener is $\min(S, 1.0)$ in Q16. The value 65536 means that the next alarm is due. Pressure is 0 while `degraded` is 1.
+Listener pressure equals $\min(S, 1.0)$ in Q16 format. Value 65536 indicates imminent deficit alarm. Pressure remains 0 while `degraded` equals 1.
 
-### 10.2 Properties
+### 10.2 Detection Properties
 
-For a sustained excess $\delta = (d - P) / P$, the number of frames to an alarm is:
+For sustained interval excess $\delta = (d - P) / P$, required frame count to alarm $N_{det}$:
 
 $$
 N_{det} = \left\lceil \frac{h}{\min(\delta, 0.5) - \epsilon} \right\rceil
 $$
 
-The detection time is $N_{det} P (1 + \delta)$. A constant excess of at most $\epsilon$ never alarms.
+Detection duration equals $N_{det} P (1 + \delta)$. Continuous excess $\le \epsilon$ never triggers an alarm.
 
-A burst hitch is a late frame that is followed by short intervals. Its excess and its catch-up cancel. The CUSUM ignores a burst hitch. A shift hitch delays all later frames. It loses slots for good and counts toward the CUSUM.
+Burst hitches with subsequent catch-up frames cancel out in CUSUM tracking. Permanent frame shifts accumulate continuously towards deficit alarms.
 
-Timestamp jitter cannot cause a drift of $S$. Let the timestamp be $t_i = n_i + e_i$, where $n_i$ is the ideal time and $e_i$ is independent jitter with mean 0. The interval is $d_i = P + e_i - e_{i-1}$. The sum of $L$ intervals is $LP + e_n - e_{n-L}$. It depends on two jitter values only.
+Timestamp jitter does not cause CUSUM metric drift. For timestamp $t_i = n_i + e_i$ with zero-mean independent jitter $e_i$, interval $d_i = P + e_i - e_{i-1}$. Summing $L$ intervals yields $LP + e_n - e_{n-L}$, depending only on boundary jitter values.
 
 ## 11. Pause and Resume
 
-An interval of $T_{pause}$ or more is a pause, not a hitch. The detector runs the resync procedure for the first frame after a pause:
+Frame intervals $\ge T_{pause}$ trigger pause handling instead of hitch classification. The initial frame following a pause executes the resync procedure:
 
-1. If `paused` is 1, emit `RESUMED`.
-2. Discard the interval.
-3. Set `paused`, `degraded`, `ok_windows`, `S` and `pending_n` to 0. Set `pending` to none.
-4. Set `win_start` to $t$ and `win_n` to 0.
-5. If `acquiring` is 0, set `wd_stage` to `ARMED` and set $c = P$.
+1. If `paused` equals 1, emit `RESUMED`.
+2. Discard current frame interval.
+3. Clear `paused`, `degraded`, `ok_windows`, `S`, and `pending_n` to 0. Set `pending` to none (`FAS_NONE`).
+4. Set `win_start` to $t$ and reset `win_n` to 0.
+5. If `acquiring` equals 0, set `wd_stage` to `ARMED` and reset $c = P$.
 
-The detector emits no hitch event for a pause. If a late timer misses the pause, the detector still resyncs. It then emits no `RESUMED` event.
+Pause intervals generate no hitch events. Delayed timers missing pause events still execute resync without emitting `RESUMED`.
 
 ## 12. Window Estimator
 
 ### 12.1 Definition
 
-A window starts at a frame with time $t_s$. It ends at the first frame with time $t_e$ such that $t_e - t_s \ge W$. The next window starts at that frame.
+Measurement windows start at frame timestamp $t_s$ and close at first frame timestamp $t_e$ meeting $t_e - t_s \ge W$. The subsequent window starts at timestamp $t_e$.
 
 $$
 \mu_w = \left\lfloor \frac{t_e - t_s}{n} \right\rfloor
@@ -362,43 +414,43 @@ $$
 \rho_w = \left\lfloor \frac{(t_e - t_s) \cdot 65536}{n P} \right\rfloor
 $$
 
-The window includes all intervals, including hitches. The sum of the intervals is $t_e - t_s$, so a burst hitch and its catch-up cancel in $\mu_w$. The error of $\mu_w$ that comes from jitter is $\sqrt{2}\,\sigma_t / n$, where $\sigma_t$ is the standard deviation of the timestamp jitter.
+Windows incorporate all frame intervals, including hitches. Interval summation $t_e - t_s$ cancels catch-up frames in mean interval $\mu_w$. Jitter error in $\mu_w$ equals $\sqrt{2}\,\sigma_t / n$ for timestamp jitter standard deviation $\sigma_t$.
 
-When a window ends, the detector runs the recovery check, then the rate tracking, then it starts the next window.
+Upon window closure, the detector evaluates recovery, executes target rate tracking, and opens a new window.
 
-### 12.2 Recovery
+### 12.2 Performance Recovery
 
-The detector runs this check only while `degraded` is 1.
+The detector executes recovery checks while `degraded` equals 1:
 
 1. If $\rho_w \le 1 + \epsilon$, increment `ok_windows`. Otherwise set `ok_windows` to 0.
-2. When `ok_windows` reaches 2, set `degraded`, `ok_windows` and $S$ to 0. Emit `RECOVERED` with $\mu_w$.
+2. When `ok_windows` reaches 2, clear `degraded`, `ok_windows`, and $S$ to 0. Emit `RECOVERED` event containing $\mu_w$.
 
-The exit threshold equals the entry tolerance. A deficit of more than $\epsilon$ raises and holds the `DEGRADED` state. A deficit of less than $\epsilon$ does neither.
+Recovery threshold matches entry tolerance $\epsilon$. Deficits exceeding $\epsilon$ trigger and maintain `DEGRADED` status.
 
-### 12.3 Rate Tracking
+### 12.3 Target Rate Tracking
 
-1. Find the target $k$ whose band contains $\mu_w$. Test the targets from fastest to slowest.
-2. If no band contains $\mu_w$, or $k = A$, set `pending` to none and `pending_n` to 0. Stop.
-3. If $k \ne$ `pending`, set `pending` to $k$ and `pending_n` to 0.
-4. Increment `pending_n`. The counter stops at 255.
-5. If $P_k > P$ (a slower target) and the lock flag is set, stop.
-6. Set $need = 4$ for a slower target and $need = 2$ for a faster target.
-7. If `pending_n` $\ge need$, run the switch procedure.
+1. Search target candidates from fastest to slowest to find target $k$ matching mean interval $\mu_w$ within its band.
+2. If no target band matches $\mu_w$, or if $k$ equals active target $A$, reset `pending` to none (`FAS_NONE`), set `pending_n` to 0, and exit.
+3. If $k \ne$ `pending`, update `pending` to $k$ and reset `pending_n` to 0.
+4. Increment `pending_n` (capped at 255).
+5. If $P_k > P$ (slower target rate) and lockdown flag is active, exit.
+6. Set required window count $need = 4$ for lower target rates, or $need = 2$ for higher target rates.
+7. If `pending_n` $\ge need$, execute rate switch procedure.
 
-**Switch procedure.** To switch to target $k$:
+**Target Switch Procedure.** Switching active target to index $k$:
 
-1. Set the active target to $k$. Set $P$, the reciprocal of $P$ and $W$ from the new target.
-2. Set $c = P$.
-3. Set `pending` to none. Set `pending_n`, `degraded`, `ok_windows` and $S$ to 0.
-4. Emit `RATE_SWITCH`. The `fps` field holds the new rate.
+1. Update active target index to $k$. Recalculate $P$, target reciprocal, and window length $W$.
+2. Reset $c = P$.
+3. Clear `pending` to none (`FAS_NONE`). Reset `pending_n`, `degraded`, `ok_windows`, and $S$ to 0.
+4. Emit `RATE_SWITCH` event. The `fps` field specifies the new target frame rate.
 
-A slower target needs more windows, because a slower rate can hide a real failure.
+Transitioning to lower frame rate targets requires additional matching windows to verify rendering stability.
 
-## 13. Watchdog
+## 13. Watchdog Timer
 
-The watchdog reports a late frame before the frame arrives. The frame procedure restarts the timer at each frame.
+The watchdog timer detects frame delays prior to frame arrival. Each frame evaluation restarts the timer.
 
-### 13.1 Delays
+### 13.1 Delay Calculations
 
 $$
 T_{soft} = R + H
@@ -408,146 +460,156 @@ T_{hard} = 3R + H
 T_{pause} = \max(F,\ 10 P_{n-1})
 $$
 
-All delays count from the last frame. $R$ and $H$ come from the state at the time of the call.
+Delays measure elapsed time since previous frame. Parameters $R$ and $H$ reflect state at execution time.
 
-### 13.2 Timer Procedure
+### 13.2 Timer State Machine
 
-The timer callback calculates $e = \max(0, now - \texttt{last})$ and acts on `wd_stage`:
+Timer callbacks evaluate elapsed time $e = \max(0, now - \texttt{last})$ based on `wd_stage`:
 
 | Stage | Condition | Action |
 | ----- | ----- | ----- |
-| `ARMED` | $e < T_{soft}$ | Do nothing. Return 0. |
+| `ARMED` | $e < T_{soft}$ | No action. Return 0. |
 | `ARMED` | $e \ge T_{soft}$ | Set `SOFT_SENT`. Emit `BOOST_SOFT`. Return $\max(T_{hard} - e, 1)$. |
 | `SOFT_SENT` | $e < T_{hard}$ | Return $T_{hard} - e$. |
 | `SOFT_SENT` | $e \ge T_{hard}$ | Set `HARD_SENT`. Emit `BOOST_HARD`. Return $\max(T_{pause} - e, 1)$. |
 | `HARD_SENT` | $e < T_{pause}$ | Return $T_{pause} - e$. |
-| `HARD_SENT` | $e \ge T_{pause}$ | Set `IDLE` and `paused`. Emit `PAUSED`. Go to idle poll. |
-| `IDLE` | Any | Go to idle poll. |
+| `HARD_SENT` | $e \ge T_{pause}$ | Set `IDLE` and `paused`. Emit `PAUSED`. Enter idle poll state. |
+| `IDLE` | Any | Enter idle poll state. |
 
-**Idle poll.** The callback marks the call as idle and returns $8 W_{min}$ (2 s). The caller checks that the game process is alive. If the process is dead, the caller removes the listener. Otherwise it arms the timer again.
+**Idle Polling.** The callback sets idle status and returns delay $8 W_{min}$ (2 s). Caller verifies target process status. Dead processes trigger listener removal. Active processes re-arm watchdog timers.
 
-The registration and each new configuration arm the timer with the idle poll delay.
+Registration and reconfiguration procedures arm the timer using idle poll delay.
 
-### 13.3 Duplicate Events
+### 13.3 Event Deduplication
 
-A stall that ends after $T_{soft}$ produces a watchdog event and a hitch event. The hitch event has the flag `FAS_EVF_WATCHDOG` when `wd_stage` is `SOFT_SENT` or `HARD_SENT` at the frame. The daemon must not count such a stall twice.
+Frame stalls persisting past $T_{soft}$ generate watchdog and subsequent hitch events. Hitch events set `FAS_EVF_WATCHDOG` when `wd_stage` equals `SOFT_SENT` or `HARD_SENT`. Daemons filter flagged events to avoid duplicate stall counts.
 
 ## 14. Events
 
-### 14.1 Event Table
+### 14.1 Event Definitions
 
-| Event | Source | Condition | `frametime` value | Suggested daemon action |
+| Event | Source | Condition | `frametime` field | Daemon action |
 | ----- | ----- | ----- | ----- | ----- |
-| `BOOST_SOFT` | Watchdog | No frame for $R + H$ | Time since the last frame | Short boost |
-| `BOOST_HARD` | Watchdog | No frame for $3R + H$ | Time since the last frame | Strong boost |
-| `PAUSED` | Watchdog | No frame for $T_{pause}$ | Time since the last frame | Remove boosts |
-| `SMALL_JANK` | Frame | $1 \le m \le 2$ | $d$ | Log, or minor boost |
-| `BIG_JANK` | Frame | $m \ge 3$ | $d$ | Strong boost |
-| `DEGRADED` | Frame | CUSUM alarm | $d$ | Raise the base performance level |
-| `RECOVERED` | Window | 2 clean windows | $\mu_w$ | Lower the base performance level |
-| `RESUMED` | Frame | First frame after `PAUSED` | 0 | Restart the model |
-| `RATE_SWITCH` | Acquisition, window | Active target changes | 0 | Update the model |
+| `BOOST_SOFT` | Watchdog | Frame delay $\ge R + H$ | Duration since previous frame | Apply minor boost |
+| `BOOST_HARD` | Watchdog | Frame delay $\ge 3R + H$ | Duration since previous frame | Apply major boost |
+| `PAUSED` | Watchdog | Frame delay $\ge T_{pause}$ | Duration since previous frame | Clear performance boosts |
+| `SMALL_JANK` | Frame | $1 \le m \le 2$ | Frame interval $d$ | Log or apply minor boost |
+| `BIG_JANK` | Frame | $m \ge 3$ | Frame interval $d$ | Apply major boost |
+| `DEGRADED` | Frame | CUSUM deficit alarm | Frame interval $d$ | Increase base performance level |
+| `RECOVERED` | Window | 2 consecutive normal windows | Mean interval $\mu_w$ | Lower base performance level |
+| `RESUMED` | Frame | Initial frame following `PAUSED` | 0 | Reset daemon state |
+| `RATE_SWITCH` | Acquisition, Window | Active target rate changed | 0 | Update daemon model |
 
-### 14.2 Payload
+### 14.2 Event Payload
 
-The module converts ticks to nanoseconds for the payload. It sets the fields when it queues the event.
+Event timestamps convert timer ticks to nanoseconds upon queue insertion.
 
-| Field | Value |
+| Field | Content |
 | ----- | ----- |
-| `timestamp_ns` | `CLOCK_MONOTONIC` time at queueing. |
-| `frametime_ns` | The `frametime` value of the event. |
-| `fps` | The active target at emission. |
-| `missed` | $\min(m, 65535)$ for hitch events. Otherwise 0. |
-| `flags` | Bit 0 is `FAS_EVF_WATCHDOG`. |
-| `pressure_q16` | Pressure (Section 10.1) after the call that made the event. |
-| `seq` | The listener counter, incremented for each event. |
+| `timestamp_ns` | `CLOCK_MONOTONIC` timestamp at event queuing. |
+| `frametime_ns` | Event-specific duration value. |
+| `fps` | Active target rate at event generation. |
+| `missed` | Missed slot count $\min(m, 65535)$ for hitches, 0 otherwise. |
+| `flags` | Bit 0 indicates `FAS_EVF_WATCHDOG`. |
+| `pressure_q16` | Deficit pressure metric (Section 10.1). |
+| `seq` | Monotonic listener event sequence counter. |
 
-### 14.3 Delivery
+### 14.3 Delivery Queue
 
-1. All listeners share one queue of 512 events.
-2. If the queue is full, the module discards the oldest event and increments a drop counter.
-3. A gap in `seq` shows that the daemon lost events. The daemon then calls `FAS_IOC_GET_STATE`. It returns `fps`, the state flags (`ACQUIRING`, `DEGRADED`, `PAUSED`), `pressure_q16`, `seq` and the drop counter.
-4. `read()` returns up to 8 events. The buffer must hold at least one 48-byte event. Otherwise `read()` returns `-EINVAL`.
+1. Listeners share a global event queue holding 512 entries.
+2. Queue overflows discard the oldest event and increment the drop counter.
+3. Sequence gaps in `seq` indicate lost events. Daemons query `FAS_IOC_GET_STATE` to read `fps`, flags (`ACQUIRING`, `DEGRADED`, `PAUSED`), `pressure_q16`, `seq`, and drop counts.
+4. `read()` returns up to 8 events per call. User buffer size must accommodate at least one 48-byte event structure; smaller buffers return `-EINVAL`.
 
-### 14.4 Volume
+### 14.4 Event Volume
 
-A healthy game produces no events. The worst case for a stream is:
+Normal rendering produces no events. Maximum event rates per stream:
 
-| Source | Bound |
+| Source | Maximum Rate |
 | ----- | ----- |
-| Hitch | 1 per frame. Only `BIG_JANK` while `degraded` is 1. |
+| Hitch | 1 per frame (`BIG_JANK` only while `degraded` equals 1). |
 | Window | 2 per window (`RECOVERED`, `RATE_SWITCH`). |
-| Watchdog | 3 per stall. |
+| Watchdog | 3 per stall sequence. |
 
 ## 15. Integer Arithmetic
 
-1. The module divides 64-bit values with `div_u64()`, `div64_u64()` and `div64_s64()`.
-2. The reciprocal $\lfloor 2^{48} / P \rfloor$ is stored for the active target. The CUSUM excess is:
+1. 64-bit integer divisions use `div_u64()`, `div64_u64()`, and `div64_s64()`.
+2. Target reciprocals $\lfloor 2^{48} / P \rfloor$ precalculate for active targets. CUSUM excess $x$:
 
 $$
 x = \frac{\bigl(\min(d, 1.5P) - P\bigr) \cdot \lfloor 2^{48} / P \rfloor}{2^{32}}
 $$
 
-3. The moving averages use signed 64-bit values with an arithmetic right shift:
+3. Moving average calculations use signed 64-bit arithmetic right shifts:
 
+```c
+dev_q4 += ((dev << 4) - dev_q4) >> 4;
+c_q4   += ((d   << 4) - c_q4)   >> 3;
 ```
-dev_q4 += ((dev << 4) - dev_q4) >> 4
-c_q4   += ((d   << 4) - c_q4)   >> 3
-```
 
-4. The module requires that a right shift of a negative signed value keeps the sign. The Linux kernel guarantees this.
-5. Every interval that reaches these calculations is less than $T_{pause}$. For $F \le 4$ GHz and a 1 fps target, $T_{pause}$ is $4 \times 10^{10}$ ticks. A shift by 16 bits then stays far below $2^{63}$. The CUSUM product has a magnitude of at most $2^{48}$.
-6. The tick to nanosecond conversion uses a multiplier and a shift. It limits the input to 60 s of ticks.
-7. The module uses `CNTFRQ_EL0` for $F$. If the register is out of range or differs from a measured value by more than 10%, the module uses the measured value rounded up to 10 kHz.
+4. Arithmetic right shifts preserve sign bits for negative values (guaranteed by Linux kernel).
+5. Evaluated intervals stay below $T_{pause}$. For $F \le 4$ GHz and 1 fps target, $T_{pause} = 4 \times 10^{10}$ ticks. 16-bit shifts prevent 64-bit integer overflow. CUSUM products remain $\le 2^{48}$.
+6. Tick-to-nanosecond conversions use fixed multiplier and shift values, capping input durations at 60 s.
+7. System counter frequency $F$ reads `CNTFRQ_EL0`. Out-of-range or inaccurate values fall back to measured hardware frequencies rounded up to 10 kHz.
+8. Quantile parameter $q$ and step size $\gamma$ use Q16 format matching CUSUM metrics. Parameter $\gamma = a / 4$ remains within overflow limits since $a \le V \le 2P$.
 
-## 16. Concurrency
+## 16. Concurrency Model
 
-1. Each listener has one raw spinlock. All access to its detector state uses `raw_spin_lock_irqsave()`.
-2. A global mutex protects the listener table. Code takes the mutex before a listener lock.
-3. **Frame handler.** The handler ignores calls from other thread groups. It takes the lock, runs the frame procedure, queues the events and arms the timer if the delay is not 0. It releases the lock, then wakes the readers.
-4. **Timer callback.** The callback takes the lock, runs the timer procedure, queues the events and arms the timer if the delay is not 0. It releases the lock, then wakes the readers. The callback does not use the automatic restart of the timer.
-5. **Configuration.** The module builds the new detector on the stack. It then takes the lock, copies the new state, keeps `seq` and arms the idle poll.
-6. The timer uses a slack of $1/16$ of its delay.
+1. Each listener maintains a raw spinlock. Detector state access requires `raw_spin_lock_irqsave()`.
+2. Global mutex serializes listener table operations. Code acquires global mutex prior to listener locks.
+3. **Frame Handler.** Filters calls from non-matching thread group IDs. Acquires lock, executes frame procedure, queues events, and schedules watchdog timer. Releases lock and wakes waiting readers.
+4. **Timer Callback.** Acquires lock, executes timer procedure, queues events, and schedules next timer stage. Releases lock and wakes readers. Callback does not use automatic timer restart.
+5. **Configuration Update.** Builds new detector instance on stack. Acquires lock, copies state, preserves `seq`, and arms idle polling timer.
+6. Watchdog timers specify $1/16$ delay slack.
 
-## 17. Parameters
+## 17. Parameter Reference
 
-| Parameter | Default | Unit | Effect of a larger value |
+| Parameter | Default | Unit | Effect of Larger Value |
 | ----- | ----- | ----- | ----- |
-| `FAS_TOL_PCT` ($\epsilon$) | 5 | % of $P$ | Fewer deficit alarms. Wider rate bands. Slower recovery check. |
-| `FAS_MIN_RATIO_PCT` | 112 | % | Stricter target list. |
-| `FAS_NOISE_MULT` ($N$) | 6 | none | Fewer false hitches. Less hitch sensitivity in noisy streams. |
-| `FAS_MISS_BIG` | 3 | slots | Fewer `BIG_JANK` events. Later `BOOST_HARD`. |
-| CUSUM clip | 0.5 | $P$ | Faster alarms from large single hitches. |
-| CUSUM limit $h$ | 1.0 | $P$ | Slower deficit alarms. |
-| Minimum window $W_{min}$ | $F/4$ | ticks | More precise mean. Slower decisions. |
-| `FAS_WIN_PERIODS` | 8 | $P$ | Longer windows for slow targets. |
-| `FAS_OK_WINDOWS` | 2 | windows | Slower recovery. |
-| `FAS_UP_WINDOWS` | 2 | windows | Slower switch to a faster target. |
-| `FAS_DOWN_WINDOWS` | 4 | windows | Slower switch to a slower target. |
-| Pause floor | $F$ | ticks | Later `PAUSED` event. |
-| `FAS_PAUSE_PERIODS` | 10 | $P_{n-1}$ | Later `PAUSED` event for slow targets. |
-| `FAS_IDLE_POLL_WINS` | 8 | $W_{min}$ | Slower detection of a dead process. |
-| Cadence weight | 1/8 | none | Faster response of $R$. |
-| Deviation weight | 1/16 | none | Faster response of $a$. |
-| $R$ cap | 2 | $P$ | Higher hitch thresholds in a degraded game. |
-| `FAS_OUT_MAX` | 4 | events | Larger output per call. |
+| `FAS_TOL_PCT` ($\epsilon$) | 5 | % of $P$ | Reduces deficit alarms. Widens target rate bands. Slows recovery. |
+| `FAS_MIN_RATIO_PCT` | 112 | % | Enforces larger separation between target frame rates. |
+| `FAS_NOISE_MULT` ($N$) | 6 | ratio | Increases fallback margin during warmup. Reduces false hitches. |
+| `FAS_QUANT_NUM`/`FAS_QUANT_DEN` ($\tau$) | 1999/2000 | ratio | Higher quantile target reduces false hitch rates after warmup. |
+| `FAS_QUANT_STEP_SHIFT` | 2 | shift | Reduces step size $\gamma$. Slows adaptation to noise changes; reduces threshold variance. |
+| `FAS_QUANT_WARMUP` | 4096 | frames | Extends reliance on fallback margin prior to adaptive quantile activation. |
+| `FAS_MISS_BIG` | 3 | slots | Reduces `BIG_JANK` events. Delays `BOOST_HARD` watchdog triggers. |
+| CUSUM upper clip | 0.5 | $P$ | Accelerates deficit alarms from large single hitches. |
+| CUSUM alarm limit $h$ | 1.0 | $P$ | Delays deficit alarm triggers. |
+| Minimum window $W_{min}$ | $F/4$ | ticks | Increases mean interval accuracy. Delays window decisions. |
+| `FAS_WIN_PERIODS` | 8 | $P$ | Extends window durations for low target frame rates. |
+| `FAS_OK_WINDOWS` | 2 | windows | Delays performance recovery transition. |
+| `FAS_UP_WINDOWS` | 2 | windows | Delays rate switch transitions to higher target rates. |
+| `FAS_DOWN_WINDOWS` | 4 | windows | Delays rate switch transitions to lower target rates. |
+| Pause floor | $F$ | ticks | Delays `PAUSED` state detection. |
+| `FAS_PAUSE_PERIODS` | 10 | $P_{n-1}$ | Delays `PAUSED` state detection for low target rates. |
+| `FAS_IDLE_POLL_WINS` | 8 | $W_{min}$ | Slows detection of terminated target processes. |
+| Cadence EWMA weight | 1/8 | ratio | Accelerates cadence adaptation $R$. |
+| Deviation EWMA weight | 1/16 | ratio | Accelerates deviation adaptation $a$. |
+| Reference cap | 2 | $P$ | Increases hitch detection thresholds in degraded states. |
+| `FAS_OUT_MAX` | 4 | events | Increases maximum event capacity per evaluation call. |
 
-## 18. False Hitch Probability
+## 18. False Alarm Analysis
 
-Assume Gaussian timestamp jitter with standard deviation $\sigma_t$. The interval jitter has standard deviation $\sigma_d = \sqrt{2}\,\sigma_t$. The detector estimates it as $\sigma_d \approx 1.2533\,a$.
+### 18.1 False Hitch Rate
 
-The probability that noise alone makes one interval a hitch is:
+Following tracker warmup (Section 8.4), hitch margin $H$ matches the $\tau$ quantile of upper frame lateness, targeting a false hitch rate of $1 - \tau$ for non-hitch intervals. Quantile tracking maintains target false hitch rates regardless of underlying jitter noise distributions.
+
+The fixed-step Robbins-Monro update tracks quantile $\tau$ with bounded oscillation rather than asymptotic convergence to a point estimate. A decreasing step size would give consistent convergence under stationary noise, but would respond too slowly to workload changes (thermal state, scene complexity, target switches). The constant step size $\gamma$ trades estimator consistency for tracking responsiveness under non-stationary conditions, which matches the target use case. Pre-warmup fallback margin $\min(\max(V/2, Na), R)$ with $N = 6$ assumes Gaussian timestamp jitter with standard deviation $\sigma_t$, yielding interval deviation $\sigma_d = \sqrt{2}\,\sigma_t \approx 1.2533\,a$ and false hitch probability:
 
 $$
-p = Q\!\left(\frac{H}{\sigma_d}\right)
+p = Q\!\left(\frac{Na}{\sigma_d}\right)
 $$
 
-$Q(z)$ is the probability that a standard normal variable is more than $z$. A game at $f$ fps has a mean time of $1 / (f p)$ between false hitches. With $N = 6$, $H / \sigma_d = 4.79$ and $p = 8.3 \times 10^{-7}$.
+For $N = 6$, ratio $H / \sigma_d = 4.79$ yields theoretical Gaussian false hitch probability $p = 8.3 \times 10^{-7}$. Non-Gaussian rendering jitter (thermal throttling, scheduler contention, IPC stalls) exhibits heavier tail distributions, motivating direct quantile tracking.
 
-A false CUSUM alarm at lag $L$ needs $e_n - e_{n-L} \ge (h + L\epsilon) P$. The probability per frame is at most:
+### 18.2 False Deficit Alarm Rate
+
+CUSUM deficit alarm rates rely on Gaussian jitter assumptions. False alarm probability at lag $L$ requires $e_n - e_{n-L} \ge (h + L\epsilon) P$. Per-frame probability bound:
 
 $$
 \sum_{L \ge 1} Q\!\left(\frac{(h + L\epsilon) P}{\sqrt{2}\,\sigma_t}\right)
 $$
 
-The term for $L = 1$ dominates. The rule $\sigma_t \le 0.15 P$ keeps this value very small.
+Dominant term $L = 1$ remains small for jitter standard deviations $\sigma_t \le 0.15 P$.
+
+This bound is a conservative sanity check, not a distributional guarantee. Unlike the hitch margin (Section 8.4), tolerance $\epsilon$ and alarm limit $h$ are fixed rather than adapted to the observed noise distribution, so actual false alarm rates under heavy-tailed jitter may differ from the Gaussian estimate above. The fixed tolerance is deliberate: deficit alarms test sustained interval excess against the fixed period $P$, which is a specification, not an estimated noise level, so there is no distribution to adapt to in the same sense as the hitch margin.

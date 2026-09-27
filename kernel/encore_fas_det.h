@@ -15,25 +15,45 @@
 #define FAS_Q 16
 #define FAS_Q_ONE (1LL << FAS_Q)
 
-/* Tolerance of a deficit, and half width of a rate band, in percent. */
+/* Tolerance of a deficit and half-width of a rate band, in percent. */
 #define FAS_TOL_PCT 5
 #define FAS_TOL_Q (FAS_Q_ONE * FAS_TOL_PCT / 100)
 
-/* The CUSUM alarm limit and the clip of one interval, in periods. */
+/* CUSUM alarm limit and single interval limit, in periods. */
 #define FAS_CUSUM_LIMIT_Q FAS_Q_ONE
 #define FAS_CUSUM_CLIP_Q (FAS_Q_ONE / 2)
 #define FAS_RECIP_SHIFT 48
 
-/* A hitch that loses this many slots is big. */
+/* Minimum slot loss count for a large hitch. */
 #define FAS_MISS_BIG 3
 
-/* Two rates must differ by this percent in period. */
+/* Minimum period difference between two frame rates, in percent. */
 #define FAS_MIN_RATIO_PCT 112
 
-/* The margin is this many mean absolute deviations of the interval. */
+/*
+ * Multiplier for fallback margin in mean absolute deviations.
+ * Used before the quantile tracker has sufficient samples.
+ */
 #ifndef FAS_NOISE_MULT
 #define FAS_NOISE_MULT 6
 #endif
+
+/*
+ * Margin tracks the FAS_QUANT_NUM/FAS_QUANT_DEN quantile of frame lateness
+ * using a fixed-step Robbins-Monro update. This holds the false hitch rate
+ * stable for any noise distribution.
+ */
+#define FAS_QUANT_NUM 1999
+#define FAS_QUANT_DEN 2000
+
+/* Right shift value to calculate step size from mean absolute deviation. */
+#define FAS_QUANT_STEP_SHIFT 2
+
+/*
+ * Required count of normal frames before using adaptive quantile values.
+ * Warmup needs several thousand frames to collect sufficient sample data.
+ */
+#define FAS_QUANT_WARMUP 4096
 
 #define FAS_WIN_PERIODS 8
 #define FAS_OK_WINDOWS 2
@@ -41,117 +61,121 @@
 #define FAS_DOWN_WINDOWS 4
 #define FAS_PAUSE_PERIODS 10
 
-/* The idle poll period in units of the minimum window. It is 2 seconds. */
+/* Idle poll period in minimum window units (2 seconds). */
 #define FAS_IDLE_POLL_WINS 8
 #define FAS_NONE 0xffu
 #define FAS_OUT_MAX 4
 
-/* Watchdog stages. */
+/* Watchdog states. */
 #define FAS_WD_ARMED 0
 #define FAS_WD_SOFT_SENT 1
 #define FAS_WD_HARD_SENT 2
 #define FAS_WD_IDLE 3
 
 /**
- * @brief One legal frame rate.
+ * @brief Frame rate target parameters.
  */
 struct fas_target {
-	/** Ideal interval in ticks. */
+	/** Target period in ticks. */
 	u32 period;
-	/** Half width of the tolerance band in ticks. */
+	/** Half-width of tolerance band in ticks. */
 	u32 band;
-	/** The frame rate. */
+	/** Frame rate in frames per second. */
 	u32 fps;
 };
 
 /**
- * @brief Read-mostly detector settings.
+ * @brief Configuration settings for detector.
  */
 struct fas_cfg {
-	/** Period of the active target. */
+	/** Active target period in ticks. */
 	u64 period;
-	/** 2^48 divided by @period. */
+	/** Value 2^48 divided by active period. */
 	u64 recip;
-	/** Vsync period. */
+	/** Display vsync period in ticks. */
 	u64 vsync;
-	/** A gap of this length is a pause. */
+	/** Frame interval threshold for pause state. */
 	u64 pause;
-	/** Shortest window. It is 250 ms. */
+	/** Minimum window length (250 ms). */
 	u64 win_min;
-	/** Window length of the active target. */
+	/** Required window length for active target. */
 	u64 win_need;
-	/** Index of the active target. */
+	/** Index of active target. */
 	u8 active;
-	/** Number of targets. */
+	/** Total count of configured targets. */
 	u8 count;
-	/** The detector must not switch to a slower target. */
+	/** Flag to prevent switching to lower frame rates. */
 	u8 lock_down;
 	u8 pad[5];
-	/** The targets, sorted from the fastest rate to the slowest rate. */
+	/** Configured targets ordered from fastest to slowest rate. */
 	struct fas_target tgt[FAS_MAX_TARGETS];
 };
 
 /**
- * @brief Detector state that each frame writes.
+ * @brief Detector state updated per frame.
  */
 struct fas_hot {
-	/** Time of the last frame. */
+	/** Timestamp of last frame. */
 	u64 last;
-	/** Start time of the window. */
+	/** Start timestamp of current window. */
 	u64 win_start;
-	/** Moving average of the interval, times 16. */
+	/** Moving average frame period, multiplied by 16. */
 	u64 cadence_q4;
-	/** Moving mean absolute deviation of the interval, times 16. */
+	/** Moving mean absolute deviation, multiplied by 16. */
 	u64 dev_q4;
-	/** The CUSUM value in Q16. */
+	/** Tracked quantile of frame deviation in Q16 ticks. */
+	u64 quant_q;
+	/** Accumulated CUSUM deficit in Q16 format. */
 	s64 cusum_q;
-	/** Intervals in the window. */
+	/** Frame count in current window. */
 	u32 win_n;
-	/** The detector has seen one frame. */
+	/** Count of normal updates, capped at FAS_QUANT_WARMUP. */
+	u16 quant_n;
+	/** Set to 1 when first frame is recorded. */
 	u8 have_last;
-	/** The detector has not chosen its first active target. */
+	/** Set to 1 while initial target rate is selected. */
 	u8 acquiring;
-	/** The game is slower than the active target. */
+	/** Set to 1 when performance is below active target. */
 	u8 degraded;
-	/** The watchdog reported a pause. */
+	/** Set to 1 when watchdog detects pause state. */
 	u8 paused;
-	/** Watchdog stage, one of FAS_WD_*. */
+	/** Current watchdog state (FAS_WD_*). */
 	u8 wd_stage;
-	/** Consecutive clean windows. */
+	/** Count of consecutive normal windows. */
 	u8 ok_windows;
-	/** Target that the last windows matched, or FAS_NONE. */
+	/** Candidate target index matching recent windows, or FAS_NONE. */
 	u8 pending;
-	/** Consecutive windows that matched @pending. */
+	/** Consecutive window count matching pending target. */
 	u8 pending_windows;
-	/** Sequence number of the last event. */
+	/** Sequence number of last event. */
 	u32 seq;
 };
 
 /**
- * @brief One event that the detector wants to report.
+ * @brief Single event generated by detector.
  */
 struct fas_ev {
-	/** One of enum fas_event_type. */
+	/** Event type (enum fas_event_type). */
 	u32 type;
-	/** FAS_EVF_* flags. */
+	/** Event flags (FAS_EVF_*). */
 	u32 flags;
-	/** Missed slots. */
+	/** Count of missed frame slots. */
 	u32 missed;
-	/** Active target. */
+	/** Active frame rate target. */
 	u32 fps;
-	/** Interval or elapsed time in ticks. */
+	/** Measured interval or elapsed time in ticks. */
 	u64 ticks;
 };
 
 /**
- * @brief Events that one detector call produces.
+ * @brief Event output container from detector call.
  */
 struct fas_out {
-	/** Number of events. */
+	/** Event count in ev array. */
 	u32 n;
-	/** The caller must check that the process is alive and poll again. */
+	/** Set to true if process check is required. */
 	bool idle;
-	/** The events. */
+	/** Array of generated events. */
 	struct fas_ev ev[FAS_OUT_MAX];
 };
 
@@ -161,11 +185,11 @@ static __always_inline u64 fas_abs_diff(u64 a, u64 b)
 }
 
 /**
- * @brief Gets the reference interval.
+ * @brief Calculates reference interval.
  *
- * @param c The settings.
- * @param h The state.
- * @return The reference interval in ticks.
+ * @param c Configuration settings.
+ * @param h Detector state.
+ * @return Reference interval in ticks.
  */
 static __always_inline u64 fas_ref(const struct fas_cfg *c,
 				   const struct fas_hot *h)
@@ -176,27 +200,32 @@ static __always_inline u64 fas_ref(const struct fas_cfg *c,
 }
 
 /**
- * @brief Gets the hitch margin.
+ * @brief Calculates hitch threshold margin.
  *
- * @param c The settings.
- * @param h The state.
- * @param ref The reference interval.
- * @return The margin in ticks.
+ * Uses tracked deviation quantile if sufficient samples exist.
+ * Falls back to fixed multiple of mean absolute deviation during warmup.
+ *
+ * @param c Configuration settings.
+ * @param h Detector state.
+ * @param ref Reference interval in ticks.
+ * @return Margin value in ticks.
  */
 static __always_inline u64 fas_margin(const struct fas_cfg *c,
 				      const struct fas_hot *h, u64 ref)
 {
-	u64 adaptive = (h->dev_q4 * FAS_NOISE_MULT) >> 4;
+	u64 adaptive = h->quant_n >= FAS_QUANT_WARMUP ?
+			       h->quant_q >> FAS_Q :
+			       (h->dev_q4 * FAS_NOISE_MULT) >> 4;
 
 	return min_t(u64, max_t(u64, c->vsync >> 1, adaptive), ref);
 }
 
 /**
- * @brief Gets the time from a frame to the soft watchdog stage.
+ * @brief Calculates delay to soft watchdog timer expiration.
  *
- * @param c The settings.
- * @param h The state.
- * @return The delay in ticks.
+ * @param c Configuration settings.
+ * @param h Detector state.
+ * @return Delay value in ticks.
  */
 static __always_inline u64 fas_soft_ticks(const struct fas_cfg *c,
 					  const struct fas_hot *h)
@@ -207,11 +236,11 @@ static __always_inline u64 fas_soft_ticks(const struct fas_cfg *c,
 }
 
 /**
- * @brief Gets the time from a frame to the hard watchdog stage.
+ * @brief Calculates delay to hard watchdog timer expiration.
  *
- * @param c The settings.
- * @param h The state.
- * @return The delay in ticks.
+ * @param c Configuration settings.
+ * @param h Detector state.
+ * @return Delay value in ticks.
  */
 static __always_inline u64 fas_hard_ticks(const struct fas_cfg *c,
 					  const struct fas_hot *h)
@@ -222,14 +251,14 @@ static __always_inline u64 fas_hard_ticks(const struct fas_cfg *c,
 }
 
 /**
- * @brief Adds one event to the output.
+ * @brief Adds an event to output buffer.
  *
- * @param c The settings.
- * @param out The output.
- * @param type The event type.
- * @param flags The event flags.
- * @param missed Missed slots.
- * @param ticks Interval or elapsed time in ticks.
+ * @param c Configuration settings.
+ * @param out Output container.
+ * @param type Event type ID.
+ * @param flags Event flags.
+ * @param missed Count of missed frame slots.
+ * @param ticks Interval or timestamp in ticks.
  */
 static inline void fas_emit(const struct fas_cfg *c, struct fas_out *out,
 			    u32 type, u32 flags, u32 missed, u64 ticks)
@@ -248,10 +277,10 @@ static inline void fas_emit(const struct fas_cfg *c, struct fas_out *out,
 }
 
 /**
- * @brief Makes a target the active target.
+ * @brief Sets active target rate and updates timing parameters.
  *
- * @param c The settings.
- * @param idx Index of the target.
+ * @param c Configuration settings.
+ * @param idx Index of target rate.
  */
 static inline void fas_det_set_active(struct fas_cfg *c, u32 idx)
 {
@@ -262,18 +291,18 @@ static inline void fas_det_set_active(struct fas_cfg *c, u32 idx)
 }
 
 /**
- * @brief Validates a target list and resets the detector.
+ * @brief Validates frame rates and initializes detector state.
  *
- * The function changes @c and @h only when it succeeds.
+ * Modifies parameters only if inputs are valid.
  *
- * @param c The settings to fill.
- * @param h The state to reset.
- * @param freq Counter frequency in hertz.
- * @param fps The legal frame rates, in any order.
- * @param count Number of rates. The range is 1 to FAS_MAX_TARGETS.
- * @param vsync Vsync period in ticks. Zero to use the period of the fastest target.
- * @param lock_down True to forbid a switch to a slower target.
- * @return 0 on success. Otherwise -EINVAL.
+ * @param c Output configuration structure.
+ * @param h Output detector state structure.
+ * @param freq Timer counter frequency in Hz.
+ * @param fps Array of frame rate targets.
+ * @param count Number of frame rate targets (1 to FAS_MAX_TARGETS).
+ * @param vsync Display vsync period in ticks, or 0 for fastest target period.
+ * @param lock_down Set to true to disable switching to lower frame rates.
+ * @return 0 on success, or -EINVAL if arguments are invalid.
  */
 static int fas_det_setup(struct fas_cfg *c, struct fas_hot *h, u64 freq,
 			 const u32 *fps, u32 count, u64 vsync, bool lock_down)
@@ -337,12 +366,12 @@ static __always_inline int fas_band_index(const struct fas_cfg *c, u64 mean)
 }
 
 /**
- * @brief Switches the active target and clears the deficit state.
+ * @brief Switches active target rate and resets deficit metrics.
  *
- * @param h The state.
- * @param c The settings.
- * @param idx Index of the new target.
- * @param out The event output.
+ * @param h Detector state.
+ * @param c Configuration settings.
+ * @param idx Index of new target rate.
+ * @param out Output container.
  */
 static noinline void fas_det_switch(struct fas_hot *h, struct fas_cfg *c,
 				    u32 idx, struct fas_out *out)
@@ -358,12 +387,12 @@ static noinline void fas_det_switch(struct fas_hot *h, struct fas_cfg *c,
 }
 
 /**
- * @brief Chooses the first active target.
+ * @brief Selects initial target rate during acquisition window.
  *
- * @param h The state.
- * @param c The settings.
- * @param span Length of the acquisition window in ticks.
- * @param out The event output.
+ * @param h Detector state.
+ * @param c Configuration settings.
+ * @param span Acquisition window duration in ticks.
+ * @param out Output container.
  */
 static noinline void fas_det_acquire(struct fas_hot *h, struct fas_cfg *c,
 				     u64 span, struct fas_out *out)
@@ -387,12 +416,12 @@ static noinline void fas_det_acquire(struct fas_hot *h, struct fas_cfg *c,
 }
 
 /**
- * @brief Counts windows that match one other target.
+ * @brief Evaluates window frame rate against candidate target.
  *
- * @param h The state.
- * @param c The settings.
- * @param mean The mean interval of the closed window.
- * @param out The event output.
+ * @param h Detector state.
+ * @param c Configuration settings.
+ * @param mean Mean frame interval in ticks.
+ * @param out Output container.
  */
 static noinline void fas_det_rate_track(struct fas_hot *h, struct fas_cfg *c,
 					u64 mean, struct fas_out *out)
@@ -424,12 +453,12 @@ static noinline void fas_det_rate_track(struct fas_hot *h, struct fas_cfg *c,
 }
 
 /**
- * @brief Applies the decisions of a closed window.
+ * @brief Process evaluation at end of measurement window.
  *
- * @param h The state.
- * @param c The settings.
- * @param now Time of the frame that closes the window.
- * @param out The event output.
+ * @param h Detector state.
+ * @param c Configuration settings.
+ * @param now Current timestamp in ticks.
+ * @param out Output container.
  */
 static noinline void fas_det_window_close(struct fas_hot *h, struct fas_cfg *c,
 					  u64 now, struct fas_out *out)
@@ -458,15 +487,15 @@ static noinline void fas_det_window_close(struct fas_hot *h, struct fas_cfg *c,
 }
 
 /**
- * @brief Reports a hitch.
+ * @brief Reports frame hitch event.
  *
- * @param h The state.
- * @param c The settings.
- * @param delta The interval in ticks.
- * @param ref The reference interval.
- * @param margin The margin.
+ * @param h Detector state.
+ * @param c Configuration settings.
+ * @param delta Measured frame interval in ticks.
+ * @param ref Reference interval in ticks.
+ * @param margin Hitch margin threshold in ticks.
  * @param flags Event flags.
- * @param out The event output.
+ * @param out Output container.
  */
 static noinline void fas_det_hitch(const struct fas_hot *h,
 				   const struct fas_cfg *c, u64 delta, u64 ref,
@@ -483,12 +512,12 @@ static noinline void fas_det_hitch(const struct fas_hot *h,
 }
 
 /**
- * @brief Handles the first frame after a pause.
+ * @brief Resets detector state after pause or frame gap.
  *
- * @param h The state.
- * @param c The settings.
- * @param now Time of the frame.
- * @param out The event output.
+ * @param h Detector state.
+ * @param c Configuration settings.
+ * @param now Current timestamp in ticks.
+ * @param out Output container.
  */
 static noinline void fas_det_resync(struct fas_hot *h, const struct fas_cfg *c,
 				    u64 now, struct fas_out *out)
@@ -510,32 +539,47 @@ static noinline void fas_det_resync(struct fas_hot *h, const struct fas_cfg *c,
 	}
 }
 
-/**
- * @brief Updates the cadence and the deviation.
+/*
+ * Updates cadence, deviation, and lateness quantile.
  *
- * @param h The state.
- * @param c The settings.
- * @param delta An interval that is not a hitch.
+ * Quantile tracks frame lateness relative to cadence using a Robbins-Monro
+ * update rule. Step size adjusts based on deviation to maintain reliable
+ * hitch detection across different frame rates.
  */
 static __always_inline void fas_det_noise_update(struct fas_hot *h,
 						 const struct fas_cfg *c,
 						 u64 delta)
 {
-	u64 dev = min_t(u64, fas_abs_diff(delta, h->cadence_q4 >> 4), c->vsync);
+	u64 cadence = h->cadence_q4 >> 4;
+	u64 a = h->dev_q4 >> 4;
+	u64 dev = min_t(u64, fas_abs_diff(delta, cadence), c->vsync);
+	u64 late_q = (delta > cadence ? delta - cadence : 0) << FAS_Q;
+	u64 step_q = max_t(u64, 1, (a << FAS_Q) >> FAS_QUANT_STEP_SHIFT);
 
 	h->dev_q4 = (u64)((s64)h->dev_q4 +
 			  ((((s64)dev << 4) - (s64)h->dev_q4) >> 4));
 	h->cadence_q4 = (u64)((s64)h->cadence_q4 +
 			      ((((s64)delta << 4) - (s64)h->cadence_q4) >> 3));
+
+	if (late_q > h->quant_q) {
+		h->quant_q += div_u64(step_q * FAS_QUANT_NUM, FAS_QUANT_DEN);
+	} else {
+		u64 down = div_u64(step_q * (FAS_QUANT_DEN - FAS_QUANT_NUM),
+				   FAS_QUANT_DEN);
+
+		h->quant_q -= min_t(u64, h->quant_q, down);
+	}
+	if (h->quant_n < FAS_QUANT_WARMUP)
+		h->quant_n++;
 }
 
 /**
- * @brief Adds one interval to the one-sided CUSUM.
+ * @brief Adds frame interval to CUSUM deficit tracking.
  *
- * @param h The state.
- * @param c The settings.
- * @param delta The interval in ticks.
- * @return true when the CUSUM reaches the alarm limit.
+ * @param h Detector state.
+ * @param c Configuration settings.
+ * @param delta Measured frame interval in ticks.
+ * @return true if CUSUM exceeds alarm limit, false otherwise.
  */
 static __always_inline bool fas_det_cusum(struct fas_hot *h,
 					  const struct fas_cfg *c, u64 delta)
@@ -550,14 +594,13 @@ static __always_inline bool fas_det_cusum(struct fas_hot *h,
 }
 
 /**
- * @brief Processes one frame.
+ * @brief Processes a single frame event.
  *
- * @param h The state.
- * @param c The settings.
- * @param now Time of the frame in ticks.
- * @param out The event output. The function sets @out->n and @out->idle.
- * @return The delay to the first watchdog stage in ticks. Zero means that the
- *         caller must leave the watchdog timer as it is.
+ * @param h Detector state.
+ * @param c Configuration settings.
+ * @param now Frame timestamp in ticks.
+ * @param out Output container for generated events.
+ * @return Watchdog timer delay in ticks, or 0 if timer state is unchanged.
  */
 static u64 fas_det_frame(struct fas_hot *h, struct fas_cfg *c, u64 now,
 			 struct fas_out *out)
@@ -577,10 +620,7 @@ static u64 fas_det_frame(struct fas_hot *h, struct fas_cfg *c, u64 now,
 		return 0;
 	}
 
-	/*
-	 * Two handlers on different CPUs can read the counter in the opposite
-	 * order of their lock order. Treat such a frame as a duplicate.
-	 */
+	/* Ignore frames arriving out of order across CPUs. */
 	delta = now - h->last;
 	if (unlikely((s64)delta <= 0))
 		return 0;
@@ -623,13 +663,13 @@ static u64 fas_det_frame(struct fas_hot *h, struct fas_cfg *c, u64 now,
 }
 
 /**
- * @brief Runs one watchdog stage. Call it from the timer callback.
+ * @brief Processes watchdog timer callback.
  *
- * @param h The state.
- * @param c The settings.
- * @param now Current time in ticks.
- * @param out The event output. The function sets @out->n and @out->idle.
- * @return The delay to the next stage in ticks.
+ * @param h Detector state.
+ * @param c Configuration settings.
+ * @param now Current timestamp in ticks.
+ * @param out Output container for generated events.
+ * @return Delay to next watchdog state in ticks.
  */
 static u64 fas_det_wd_fire(struct fas_hot *h, const struct fas_cfg *c, u64 now,
 			   struct fas_out *out)
@@ -672,10 +712,10 @@ static u64 fas_det_wd_fire(struct fas_hot *h, const struct fas_cfg *c, u64 now,
 }
 
 /**
- * @brief Gets the deficit accumulator for events and state.
+ * @brief Gets normalized deficit pressure metric.
  *
- * @param h The state.
- * @return The CUSUM value in Q16, at most 65536.
+ * @param h Detector state.
+ * @return CUSUM value scaled to Q16 format (maximum 65536).
  */
 static __always_inline u32 fas_det_pressure(const struct fas_hot *h)
 {

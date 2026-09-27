@@ -21,10 +21,9 @@
 #define MS 1000000ull
 
 /**
- * @brief The function that the module probes.
+ * @brief Dummy probed function for test execution.
  *
- * The test calls it like a game calls Surface::queueBuffer. The attributes keep
- * the function out of inlining and keep its symbol in the dynamic symbol table.
+ * Simulated target function probed by kernel uprobe during selftests.
  */
 __attribute__((noinline, used, visibility("default"))) void fas_probe_frame(void) {
     __asm__ volatile("" ::: "memory");
@@ -57,11 +56,11 @@ static void sleep_until(uint64_t t) {
 }
 
 /**
- * @brief Sends frames at a fixed rate.
+ * @brief Triggers probe function calls at fixed frame rate.
  *
- * @param s The scenario. The function keeps the schedule in s->next.
- * @param fps The frame rate.
- * @param seconds The duration.
+ * @param s Scenario structure pointer.
+ * @param fps Target frame rate.
+ * @param seconds Duration in seconds.
  */
 static void frames(struct scenario *s, unsigned fps, double seconds) {
     uint64_t period = 1000000000ull / fps;
@@ -75,20 +74,20 @@ static void frames(struct scenario *s, unsigned fps, double seconds) {
 }
 
 /**
- * @brief Delays the next frame. The next frames stay late (a shift hitch).
+ * @brief Delays next frame timing schedule.
  *
- * @param s The scenario.
- * @param ms The delay in milliseconds.
+ * @param s Scenario structure pointer.
+ * @param ms Delay duration in milliseconds.
  */
 static void delay_ms(struct scenario *s, unsigned ms) {
     s->next += (uint64_t)ms * MS;
 }
 
 /**
- * @brief Stops the frames for a time.
+ * @brief Suspends frame generation for specified duration.
  *
- * @param s The scenario.
- * @param seconds The length of the gap.
+ * @param s Scenario structure pointer.
+ * @param seconds Duration in seconds.
  */
 static void silence(struct scenario *s, double seconds) {
     s->next += (uint64_t)(seconds * 1e9);
@@ -96,9 +95,9 @@ static void silence(struct scenario *s, double seconds) {
 }
 
 /**
- * @brief Reads all events that the queue holds and checks the sequence numbers.
+ * @brief Reads pending events from queue and verifies sequence numbers.
  *
- * @param s The scenario. The function appends to s->ev.
+ * @param s Scenario structure pointer.
  */
 static void drain(struct scenario *s) {
     for (;;) {
@@ -147,11 +146,11 @@ static int switch_fps(const struct scenario *s, int nth) {
 }
 
 /**
- * @brief Records the result of one check.
+ * @brief Evaluates condition and records test failure if false.
  *
- * @param s The scenario.
- * @param ok The result of the check.
- * @param fmt The text of the check, in printf format.
+ * @param s Scenario structure pointer.
+ * @param ok Evaluation result.
+ * @param fmt Error message format string.
  */
 static void check(struct scenario *s, int ok, const char *fmt, ...) {
     va_list ap;
@@ -168,13 +167,13 @@ static void check(struct scenario *s, int ok, const char *fmt, ...) {
 }
 
 /**
- * @brief Starts a scenario. The function loads a new target list, which resets the detector.
+ * @brief Initializes test scenario with new configuration targets.
  *
- * @param s The scenario.
- * @param fps The target list.
- * @param count The number of targets.
- * @param vsync_hz The display refresh rate.
- * @param lock_down Non-zero forbids a switch to a slower target.
+ * @param s Scenario structure pointer.
+ * @param fps Array of target frame rates.
+ * @param count Target count.
+ * @param vsync_hz Display refresh rate in Hz.
+ * @param lock_down Set to non-zero to disable switching to lower rates.
  */
 static void begin(struct scenario *s, const uint32_t *fps, uint32_t count, uint32_t vsync_hz, int lock_down) {
     struct fas_config cfg;
@@ -285,12 +284,12 @@ static void sc_rates(struct scenario *s) {
 }
 
 /**
- * @brief Tests the error paths of the interface and the cleanup of a dead process.
+ * @brief Tests API error handling and process cleanup logic.
  *
- * @param s The scenario.
- * @param path The path of this executable.
- * @param off The file offset of fas_probe_frame.
- * @param quick Non-zero skips the wait for the cleanup.
+ * @param s Scenario structure pointer.
+ * @param path Binary path of executable.
+ * @param off Target function file offset.
+ * @param quick Set to non-zero to skip delayed cleanup check.
  */
 static void sc_api(struct scenario *s, const char *path, uint64_t off, int quick) {
     struct fas_config bad, good;
@@ -350,15 +349,11 @@ static void sc_api(struct scenario *s, const char *path, uint64_t off, int quick
 }
 
 /**
- * @brief Tests that a listener sees frames of its own process only.
+ * @brief Tests process event isolation between listeners.
  *
- * A second listener watches an idle child process. The uprobe core calls the
- * handler of both listeners for a frame of the parent. The second listener
- * must ignore that frame.
- *
- * @param s The scenario.
- * @param path The path of this executable.
- * @param off The file offset of fas_probe_frame.
+ * @param s Scenario structure pointer.
+ * @param path Binary path of executable.
+ * @param off Target function file offset.
  */
 static void sc_isolation(struct scenario *s, const char *path, uint64_t off) {
     const uint32_t f[] = {60};
@@ -411,15 +406,11 @@ static void *frame_thread(void *arg) {
 }
 
 /**
- * @brief Runs frames on two threads while the main thread changes the state.
+ * @brief Runs concurrent frame triggers and API configuration updates.
  *
- * The test has no exact expectation. It looks for a hang, an error code that
- * the interface must not return, and a kernel warning (the caller checks the
- * kernel log).
- *
- * @param s The scenario.
- * @param path The path of this executable.
- * @param off The file offset of fas_probe_frame.
+ * @param s Scenario structure pointer.
+ * @param path Binary path of executable.
+ * @param off Target function file offset.
  */
 static void sc_stress(struct scenario *s, const char *path, uint64_t off) {
     const uint32_t f1[] = {60}, f2[] = {30, 60, 120};
@@ -472,14 +463,11 @@ static void sc_stress(struct scenario *s, const char *path, uint64_t off) {
 }
 
 /**
- * @brief Acts as a game. The function calls the probed function at a fixed rate.
+ * @brief Triggers probe function at specified frame rate.
  *
- * Use it with the command "attach -l <this executable> -s fas_probe_frame" from
- * another shell to see the events of a listener without a real game.
- *
- * @param fps The frame rate.
- * @param seconds The duration.
- * @return 0 on success. Otherwise 1.
+ * @param fps Target frame rate.
+ * @param seconds Test duration in seconds.
+ * @return 0 on success, or 1 on invalid arguments.
  */
 int fas_selftest_frames(unsigned fps, double seconds) {
     struct scenario *s = calloc(1, sizeof(*s));
@@ -496,14 +484,10 @@ int fas_selftest_frames(unsigned fps, double seconds) {
 }
 
 /**
- * @brief Runs the end-to-end test on this device.
+ * @brief Executes complete selftest suite on current device.
  *
- * The test registers a listener on its own process. The probed function is
- * fas_probe_frame in this executable. The test then runs scenarios with known
- * frame timing and checks the events.
- *
- * @param quick Non-zero shortens the test.
- * @return 0 when all checks pass. Otherwise 1.
+ * @param quick Set to non-zero to run fast test subset.
+ * @return 0 if all tests pass, or 1 if any test fails.
  */
 int fas_selftest_run(int quick) {
     static const char *const symbols[] = {"fas_probe_frame"};

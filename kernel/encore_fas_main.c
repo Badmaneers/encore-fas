@@ -69,8 +69,11 @@ static long fas_ioctl_get_state(void __user *uarg)
 }
 
 /**
- * @brief Handles the control commands. Only root can call it.
+ * @brief Handles ioctl control commands. Restricted to root callers.
  *
+ * @param file File structure pointer.
+ * @param cmd Ioctl command ID.
+ * @param arg Command argument pointer.
  * @return 0 on success, or a negative error code.
  */
 static long fas_ioctl(struct file *file, unsigned int cmd, unsigned long arg)

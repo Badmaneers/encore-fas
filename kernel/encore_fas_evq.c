@@ -24,7 +24,7 @@ static struct {
 } evq;
 
 /**
- * @brief Prepares the queue.
+ * @brief Initializes event queue data structures.
  */
 void fas_evq_init(void)
 {
@@ -40,11 +40,11 @@ void fas_evq_init(void)
 }
 
 /**
- * @brief Copies up to @max pending events without removing them.
+ * @brief Copies pending events without removal from queue.
  *
- * @param out The array that receives the events.
- * @param max The size of @out.
- * @return The number of events copied.
+ * @param out Output buffer for copied events.
+ * @param max Maximum events to copy.
+ * @return Count of events copied.
  */
 static u32 fas_evq_peek(struct fas_event *out, u32 max)
 {
@@ -61,24 +61,24 @@ static u32 fas_evq_peek(struct fas_event *out, u32 max)
 }
 
 /**
- * @brief Removes up to @n events that a prior fas_evq_peek() returned.
+ * @brief Removes read events from queue.
  *
- * @param n The number of events to remove.
+ * @param n Count of events to remove.
  */
 static void fas_evq_release(u32 n)
 {
 	unsigned long flags;
 
 	raw_spin_lock_irqsave(&evq.lock, flags);
-	/* Clamp in case an overflow already advanced tail past our peek. */
+	/* Clamp event count to available queue size. */
 	evq.tail += min_t(u32, n, evq.head - evq.tail);
 	raw_spin_unlock_irqrestore(&evq.lock, flags);
 }
 
 /**
- * @brief Adds an event to the queue.
+ * @brief Adds event to queue.
  *
- * @param ev The event to copy.
+ * @param ev Event structure to add.
  */
 void fas_evq_push(const struct fas_event *ev)
 {
@@ -95,7 +95,7 @@ void fas_evq_push(const struct fas_event *ev)
 }
 
 /**
- * @brief Wakes the readers. Call it after fas_evq_push().
+ * @brief Wakes processes waiting to read events.
  */
 void fas_evq_wake(void)
 {
@@ -103,9 +103,9 @@ void fas_evq_wake(void)
 }
 
 /**
- * @brief Reads the count of dropped events.
+ * @brief Gets count of dropped events.
  *
- * @return The number of events that the queue dropped.
+ * @return Total count of dropped events.
  */
 u32 fas_evq_dropped(void)
 {
@@ -118,13 +118,13 @@ static bool fas_evq_nonempty(void)
 }
 
 /**
- * @brief Implements read().
+ * @brief Implements character device read operation.
  *
- * @param file The file.
- * @param buf The user buffer. It must hold at least one event.
- * @param count The size of @buf in bytes.
- * @param ppos Not used.
- * @return The number of bytes copied, or a negative error code.
+ * @param file File structure pointer.
+ * @param buf User buffer pointer.
+ * @param count User buffer size in bytes.
+ * @param ppos File position offset (unused).
+ * @return Bytes copied on success, or negative error code.
  */
 ssize_t fas_evq_read(struct file *file, char __user *buf, size_t count,
 		     loff_t *ppos)
@@ -157,7 +157,7 @@ ssize_t fas_evq_read(struct file *file, char __user *buf, size_t count,
 	}
 
 	if (copy_to_user(buf, batch, n * sizeof(*batch))) {
-		ret = -EFAULT;   /* events stay in the queue, nothing lost */
+		ret = -EFAULT;   /* Retain events in queue if copy fails. */
 		goto out;
 	}
 
@@ -170,11 +170,11 @@ out:
 }
 
 /**
- * @brief Implements poll().
+ * @brief Implements poll operation for read readiness.
  *
- * @param file The file.
- * @param wait The poll table.
- * @return The readable mask when an event exists.
+ * @param file File structure pointer.
+ * @param wait Poll table pointer.
+ * @return Poll event mask indicating read availability.
  */
 fas_poll_t fas_evq_poll(struct file *file, poll_table *wait)
 {

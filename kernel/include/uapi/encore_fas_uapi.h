@@ -12,62 +12,62 @@
 #define FAS_MAX_TARGETS 8
 #define FAS_MAX_LISTENERS 16
 
-/* Configuration flags. */
+/* Configuration flag definitions. */
 #define FAS_CFG_LOCK_DOWN (1u << 0)
 
-/* Flags of struct fas_state. */
+/* Status flags for struct fas_state. */
 #define FAS_STATE_ACQUIRING (1u << 0)
 #define FAS_STATE_DEGRADED (1u << 1)
 #define FAS_STATE_PAUSED (1u << 2)
 
-/* Flags of struct fas_event. */
+/* Event flags for struct fas_event. */
 #define FAS_EVF_WATCHDOG (1u << 0)
 
 /**
- * @brief Module version.
+ * @brief Module version information.
  */
 struct fas_version {
-	// Number of git commits at build time.
+	// Git commit count at build time.
 	__u32 version;
-	// Layout version of this header. It must equal to FAS_ABI_VERSION.
+	// Header ABI version (must equal FAS_ABI_VERSION).
 	__u32 abi;
-	// Frequency of the arm64 system counter.
+	// Frequency of system counter in Hz.
 	__u32 counter_hz;
-	// Reserved for future expansion.
+	// Reserved field.
 	__u32 reserved;
 };
 
 /**
- * @brief Frame rate targets of one listener.
+ * @brief Target configuration for listener.
  */
 struct fas_config {
-	// FAS_CFG_* flags.
+	// Configuration flags (FAS_CFG_*).
 	__u32 flags;
-	// Vsync period of the display.
+	// Display vsync period in nanoseconds.
 	__u32 vsync_ns;
-	// Number of valid entries in @fps. The range is 1 to FAS_MAX_TARGETS.
+	// Count of valid frame rates in fps array (1 to FAS_MAX_TARGETS).
 	__u32 count;
 
-	// Reserved for future expansion.
+	// Reserved field.
 	__u32 reserved;
 
-	// Legal frame rates.
+	// Configured frame rates in fps.
 	__u32 fps[FAS_MAX_TARGETS];
 };
 
 /**
- * @brief Argument of FAS_IOC_REGISTER.
+ * @brief Input structure for FAS_IOC_REGISTER command.
  */
 struct fas_register_args {
-	// Process ID of the game.
+	// Target process ID.
 	__s32 pid;
-	// The ID of the new listener.
+	// Output listener ID assigned by module.
 	__s32 ctx_id;
-	// File offset of the probed function inside @path.
+	// File offset of probed function.
 	__u64 offset;
-	// Initial targets.
+	// Initial configuration targets.
 	struct fas_config cfg;
-	// Path of the file that holds the probed function.
+	// Path to target binary file.
 	char path[FAS_MAX_PATH_LEN];
 };
 
@@ -82,23 +82,23 @@ struct fas_config_args {
 };
 
 /**
- * @brief Argument of FAS_IOC_GET_STATE.
+ * @brief Output structure for FAS_IOC_GET_STATE command.
  */
 struct fas_state {
-	// The listener that made the event.
+	// Listener ID.
 	__s32 ctx_id;
-	// Active target.
+	// Active target frame rate in fps.
 	__u32 fps;
-	// FAS_STATE_* flags.
+	// Status flags (FAS_STATE_*).
 	__u32 flags;
-	// Deficit accumulator.
+	// Deficit pressure in Q16 format.
 	__u32 pressure_q16;
-	// Sequence number of the last event of this listener.
+	// Sequence number of last event.
 	__u32 seq;
-	// Events that the module dropped because the queue was full.
+	// Count of dropped events due to full queue.
 	__u32 dropped;
 
-	// Reserved for future expansion.
+	// Reserved fields.
 	__u32 reserved[2];
 };
 
@@ -127,28 +127,28 @@ enum fas_event_type {
 };
 
 /**
- * @brief One record that read() returns.
+ * @brief Event record returned by read operations.
  */
 struct fas_event {
-	// The listener that made the event.
+	// Listener ID.
 	__s32 ctx_id;
-	// One of enum fas_event_type.
+	// Event type (enum fas_event_type).
 	__u32 type;
-	// Event time. The clock is CLOCK_MONOTONIC.
+	// Event timestamp using CLOCK_MONOTONIC.
 	__u64 timestamp_ns;
-	// The interval that caused the event.
+	// Frame interval in nanoseconds.
 	__u64 frametime_ns;
-	// Active target when the module made the event.
+	// Active frame rate target when event occurred.
 	__u32 fps;
-	// Missed frame slots. Only jank events set it.
+	// Count of missed frame slots.
 	__u32 missed;
-	// FAS_EVF_* flags.
+	// Event flags (FAS_EVF_*).
 	__u32 flags;
-	// Deficit accumulator.
+	// Deficit pressure in Q16 format.
 	__u32 pressure_q16;
-	// Counter of the listener.
+	// Event sequence counter for listener.
 	__u32 seq;
-	// Reserved for future expansion.
+	// Reserved field.
 	__u32 reserved;
 } __attribute__((aligned(8)));
 

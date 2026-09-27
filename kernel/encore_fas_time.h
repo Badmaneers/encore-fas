@@ -9,25 +9,25 @@
 #include <linux/types.h>
 
 /**
- * @brief Constants of the counter.
+ * @brief System counter frequency parameters.
  */
 struct fas_clock {
-	/** Counter frequency in hertz. */
+	/** Counter frequency in Hz. */
 	u64 freq;
-	/** Multiplier of the tick to nanosecond conversion. */
+	/** Multiplier for tick-to-nanosecond conversion. */
 	u64 mult;
-	/** Largest input of fas_ticks_to_ns() that cannot overflow. */
+	/** Maximum tick value to prevent calculation overflow. */
 	u64 max_ticks;
-	/** Right shift of the tick to nanosecond conversion. */
+	/** Shift count for tick-to-nanosecond conversion. */
 	u32 shift;
 };
 
 extern struct fas_clock fas_clk;
 
 /**
- * @brief Reads the virtual counter.
+ * @brief Reads current virtual counter value.
  *
- * @return The counter value in ticks.
+ * @return Counter value in ticks.
  */
 static __always_inline u64 fas_ticks(void)
 {
@@ -38,10 +38,10 @@ static __always_inline u64 fas_ticks(void)
 }
 
 /**
- * @brief Converts ticks to nanoseconds.
+ * @brief Converts timer ticks to nanoseconds.
  *
- * @param ticks The value to convert. Larger values become fas_clk.max_ticks.
- * @return The value in nanoseconds.
+ * @param ticks Input value in ticks. Clamped to max_ticks.
+ * @return Equivalent duration in nanoseconds.
  */
 static __always_inline u64 fas_ticks_to_ns(u64 ticks)
 {

@@ -19,9 +19,9 @@ struct fas_clock fas_clk __read_mostly;
 #define FAS_MAX_SECONDS 60
 
 /**
- * @brief Reads the counter frequency and builds the conversion constants.
+ * @brief Reads counter frequency and calculates conversion constants.
  *
- * @return 0 on success. Otherwise -ENODEV.
+ * @return 0 on success, or -ENODEV if counter frequency is invalid.
  */
 int fas_time_init(void)
 {
@@ -51,8 +51,8 @@ int fas_time_init(void)
 	fas_clk.max_ticks = freq * FAS_MAX_SECONDS;
 
 	/*
-	 * Find the largest shift for which max_ticks * mult still fits in 64
-	 * bits. A larger shift gives a smaller rounding error.
+	 * Find maximum bit shift where max_ticks * mult fits in 64 bits.
+	 * Larger shift reduces calculation rounding errors.
 	 */
 	for (shift = 32; shift > 0; shift--) {
 		u64 mult = div64_u64((u64)NSEC_PER_SEC << shift, freq);
@@ -68,10 +68,10 @@ int fas_time_init(void)
 }
 
 /**
- * @brief Converts nanoseconds to ticks.
+ * @brief Converts nanosecond value to timer ticks.
  *
- * @param ns The value to convert.
- * @return The value in ticks.
+ * @param ns Time duration in nanoseconds.
+ * @return Equivalent duration in timer ticks.
  */
 u64 fas_ns_to_ticks(u64 ns)
 {

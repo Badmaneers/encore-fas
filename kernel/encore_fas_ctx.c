@@ -21,28 +21,28 @@
 
 struct fas_ctx {
 	raw_spinlock_t lock ____cacheline_aligned;
-	/** Thread group ID of the game. The handler compares it to current. */
+	/** Thread group ID of target process. The handler compares it to current. */
 	u32 tgid;
-	/** Detector state. The lock, @tgid and this member fill one cache line. */
+	/** Detector state. Lock, @tgid, and this member share one cache line. */
 	struct fas_hot hot;
 
-	/** Listener ID that the daemon uses. */
+	/** Listener ID used by daemon. */
 	u32 id ____cacheline_aligned;
-	/** Detector settings. The first 56 bytes share a line with @id. */
+	/** Detector settings. The first 56 bytes share a cache line with @id. */
 	struct fas_cfg cfg;
 
 	struct hrtimer wd ____cacheline_aligned;
-	/** The uprobe consumer. */
+	/** Uprobe consumer structure. */
 	struct uprobe_consumer uc;
-	/** The uprobe handle. */
+	/** Uprobe handle. */
 	struct fas_probe probe;
-	/** Reference to the probed file. */
+	/** Path to probed file. */
 	struct path path;
-	/** Reference to the thread group leader. */
+	/** PID structure of thread group leader. */
 	struct pid *pid;
-	/** Cleanup work for a dead process. */
+	/** Cleanup work item for stopped process. */
 	struct work_struct work;
-	/** The slot holds a listener. Only fas_mutex changes it. */
+	/** Set to true if slot is active. Only fas_mutex changes this value. */
 	bool in_use;
 };
 
@@ -51,10 +51,10 @@ static DEFINE_MUTEX(fas_mutex);
 static u32 fas_next_id;
 
 /**
- * @brief Checks that the game still runs.
+ * @brief Checks if target process is active.
  *
- * @param ctx The listener.
- * @return true when the process is alive.
+ * @param ctx Listener structure.
+ * @return true if process is active, false otherwise.
  */
 static bool fas_ctx_alive(const struct fas_ctx *ctx)
 {
@@ -73,10 +73,10 @@ static bool fas_ctx_alive(const struct fas_ctx *ctx)
 }
 
 /**
- * @brief Starts the watchdog timer.
+ * @brief Starts watchdog timer.
  *
- * @param ctx The listener.
- * @param ticks The delay in ticks.
+ * @param ctx Listener structure.
+ * @param ticks Delay duration in ticks.
  */
 static void fas_ctx_arm(struct fas_ctx *ctx, u64 ticks)
 {
@@ -87,10 +87,10 @@ static void fas_ctx_arm(struct fas_ctx *ctx, u64 ticks)
 }
 
 /**
- * @brief Converts detector events and queues them.
+ * @brief Converts and queues detector events.
  *
- * @param ctx The listener. The caller holds ctx->lock.
- * @param out The events from the detector.
+ * @param ctx Listener structure. Caller must hold ctx->lock.
+ * @param out Output container with detector events.
  */
 static void fas_ctx_publish(struct fas_ctx *ctx, const struct fas_out *out)
 {
@@ -117,7 +117,7 @@ static void fas_ctx_publish(struct fas_ctx *ctx, const struct fas_out *out)
 }
 
 /**
- * @brief Runs at each call of Surface::queueBuffer.
+ * @brief Handles probe execution on Surface::queueBuffer calls.
  *
  * @return Always 0.
  */
@@ -146,9 +146,9 @@ static int fas_uprobe_handler(FAS_UPROBE_HANDLER_ARGS)
 }
 
 /**
- * @brief Tells the uprobe core where to insert the breakpoint.
+ * @brief Filters uprobe events by process memory space.
  *
- * @return true when @mm belongs to the game.
+ * @return true if @mm matches target process.
  */
 static bool fas_uprobe_filter(FAS_UPROBE_FILTER_ARGS)
 {
@@ -165,7 +165,7 @@ static bool fas_uprobe_filter(FAS_UPROBE_FILTER_ARGS)
 }
 
 /**
- * @brief Watchdog timer callback.
+ * @brief Handles watchdog timer expiration.
  *
  * @return Always HRTIMER_NORESTART.
  */
@@ -197,7 +197,7 @@ static enum hrtimer_restart fas_wd_fn(struct hrtimer *timer)
 /**
  * @brief Detaches a listener.
  *
- * @param ctx The listener.
+ * @param ctx Listener structure.
  */
 static void fas_ctx_teardown(struct fas_ctx *ctx)
 {
@@ -245,7 +245,7 @@ static int fas_cfg_build(struct fas_cfg *c, struct fas_hot *h,
 }
 
 /**
- * @brief Prepares the slots.
+ * @brief Initializes listener slots and work items.
  */
 void fas_ctx_init(void)
 {
@@ -256,7 +256,7 @@ void fas_ctx_init(void)
 	BUILD_BUG_ON(sizeof(struct fas_hot) != 56);
 #if L1_CACHE_BYTES == 64 && !defined(CONFIG_DEBUG_SPINLOCK) && \
 	!defined(CONFIG_LOCKDEP)
-	/* The lock, the process ID and the hot state fill one line. */
+	/* Lock, TGID, and hot state fit in one cache line. */
 	BUILD_BUG_ON(offsetof(struct fas_ctx, id) != L1_CACHE_BYTES);
 #endif
 
@@ -276,16 +276,16 @@ void fas_ctx_exit(void)
 		fas_ctx_teardown(&fas_slots[i]);
 	mutex_unlock(&fas_mutex);
 
-	/* A queued work item can still wait for fas_mutex. Wait for it. */
+	/* Wait for pending work items to stop. */
 	for (i = 0; i < FAS_MAX_LISTENERS; i++)
 		cancel_work_sync(&fas_slots[i].work);
 }
 
 /**
- * @brief Attaches a probe to a game process.
+ * @brief Attaches probe to target process.
  *
- * @param req The request. The function sets @req->ctx_id.
- * @return 0 on success. Otherwise a negative error code.
+ * @param req Registration parameters. Function updates @req->ctx_id.
+ * @return 0 on success, or a negative error code.
  */
 int fas_ctx_register(struct fas_register_args *req)
 {
@@ -371,10 +371,10 @@ err_pid:
 }
 
 /**
- * @brief Detaches a listener.
+ * @brief Removes listener by ID.
  *
- * @param ctx_id The listener ID.
- * @return 0 on success. Otherwise -ENOENT.
+ * @param ctx_id Listener ID.
+ * @return 0 on success, or -ENOENT if not found.
  */
 int fas_ctx_remove(s32 ctx_id)
 {
@@ -393,11 +393,11 @@ int fas_ctx_remove(s32 ctx_id)
 }
 
 /**
- * @brief Replaces the targets of a listener.
+ * @brief Updates configuration targets for a listener.
  *
- * @param ctx_id The listener ID.
- * @param cfg The new targets.
- * @return 0 on success. Otherwise a negative error code.
+ * @param ctx_id Listener ID.
+ * @param cfg New configuration settings.
+ * @return 0 on success, or a negative error code.
  */
 int fas_ctx_set_config(s32 ctx_id, const struct fas_config *cfg)
 {
@@ -430,9 +430,10 @@ int fas_ctx_set_config(s32 ctx_id, const struct fas_config *cfg)
 }
 
 /**
- * @brief Reads the state of a listener.
+ * @brief Reads status information for a listener.
  *
- * @return 0 on success. Otherwise -ENOENT.
+ * @param state Output status structure.
+ * @return 0 on success, or -ENOENT if not found.
  */
 int fas_ctx_get_state(struct fas_state *state)
 {
@@ -465,9 +466,9 @@ int fas_ctx_get_state(struct fas_state *state)
 }
 
 /**
- * @brief Lists the attached listeners.
+ * @brief Gets list of active listeners.
  *
- * @param list The structure that receives the list.
+ * @param list Output structure for listener details.
  */
 void fas_ctx_list(struct fas_listener_list *list)
 {
