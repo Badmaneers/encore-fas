@@ -236,6 +236,49 @@ static void t_healthy(u64 freq)
 	}
 }
 
+static void t_margin_cap(u64 freq)
+{
+	enum { NINJ = 400 };
+	u32 fps[] = { 60 };
+	int inj[NINJ], ninj = 0, i, k, hit = 0;
+	double p = 1000.0 / 60;
+
+	rng_state = 7000;
+	TR.n = 0;
+	TR.nominal = 0;
+	for (i = 0; i < 120000 && TR.n < MAXF - 1; i++) {
+		double t;
+
+		TR.nominal += p * 1e6;
+		t = TR.nominal + gauss() * 0.4e6;
+		if (urand() < 0.10)
+			t += -log(urand()) * 8e6;
+		if (i >= 6000 && i % 290 == 0 && ninj < NINJ) {
+			t += p * 1e6;
+			inj[ninj++] = TR.n;
+		}
+		tpush(&TR, t);
+	}
+	run_trace(&RN, &TR, freq, fps, 1, 16.667, false, 0);
+
+	for (k = 0; k < ninj; k++) {
+		u64 t = to_ticks(&RN, TR.ns[inj[k]]);
+
+		for (i = 0; i < RN.n; i++)
+			if ((RN.e[i].type == FAS_EVENT_SMALL_JANK ||
+			     RN.e[i].type == FAS_EVENT_BIG_JANK) &&
+			    RN.e[i].t == t) {
+				hit++;
+				break;
+			}
+	}
+	if (verbose)
+		printf("heavy tail: %d of %d single-slot hitches reported\n", hit,
+		       ninj);
+	CHECK(ninj > 100 && hit * 100 >= ninj * 90,
+	      "reported %d of %d one-slot hitches", hit, ninj);
+}
+
 static void t_hitches(u64 freq)
 {
 	double delays[] = { 16.667, 33.333, 100.0 };
@@ -511,6 +554,7 @@ int main(int argc, char **argv)
 		t_setup(freq);
 		t_reciprocal(freq);
 		t_healthy(freq);
+		t_margin_cap(freq);
 		t_hitches(freq);
 		t_deficit(freq);
 		t_rates(freq);

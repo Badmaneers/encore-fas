@@ -50,6 +50,21 @@
 #define FAS_QUANT_STEP_SHIFT 2
 
 /*
+ * The hitch margin H never exceeds ref * (1 - 2^-FAS_MARGIN_CAP_SHIFT), which
+ * is 0.75 * ref by default.
+ *
+ * The quantile tracker only sees frames below ref + H. Jank that stays below
+ * that threshold is learned as noise, which raises the quantile and H until
+ * H reaches its old cap, ref. At H = ref a single missed frame slot (interval
+ * 2P) sits on the threshold, and jitter decides whether it is reported. With
+ * this cap the threshold stays below 1.75 * ref, so a missed slot is always
+ * reported. H is still at least V / 2. Use a larger shift for a higher cap.
+ */
+#ifndef FAS_MARGIN_CAP_SHIFT
+#define FAS_MARGIN_CAP_SHIFT 2
+#endif
+
+/*
  * Required count of normal frames before using adaptive quantile values.
  * Warmup needs several thousand frames to collect sufficient sample data.
  */
@@ -204,6 +219,7 @@ static __always_inline u64 fas_ref(const struct fas_cfg *c,
  *
  * Uses tracked deviation quantile if sufficient samples exist.
  * Falls back to fixed multiple of mean absolute deviation during warmup.
+ * The result is at least V / 2 and at most 0.75 * ref (see FAS_MARGIN_CAP_SHIFT).
  *
  * @param c Configuration settings.
  * @param h Detector state.
@@ -216,8 +232,10 @@ static __always_inline u64 fas_margin(const struct fas_cfg *c,
 	u64 adaptive = h->quant_n >= FAS_QUANT_WARMUP ?
 			       h->quant_q >> FAS_Q :
 			       (h->dev_q4 * FAS_NOISE_MULT) >> 4;
+	u64 cap = max_t(u64, c->vsync >> 1, ref - (ref >> FAS_MARGIN_CAP_SHIFT));
 
-	return min_t(u64, max_t(u64, c->vsync >> 1, adaptive), ref);
+	adaptive = max_t(u64, c->vsync >> 1, adaptive);
+	return min_t(u64, min_t(u64, adaptive, cap), ref);
 }
 
 /**
