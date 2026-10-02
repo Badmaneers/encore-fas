@@ -8,6 +8,7 @@ libs/
 *.mod.c
 .*.cmd
 *.zip
+*.patch
 Module.symvers
 modules.order
 kernel/scripts/tools/check_symbol

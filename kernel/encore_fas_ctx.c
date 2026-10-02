@@ -73,6 +73,12 @@ static bool fas_ctx_alive(const struct fas_ctx *ctx)
 }
 
 /**
+ * Maximum timer slack of the watchdog in nanoseconds. The watchdog restarts on
+ * every frame, so a large slack only delays the boost events.
+ */
+#define FAS_WD_SLACK_MAX_NS (500 * NSEC_PER_USEC)
+
+/**
  * @brief Starts watchdog timer.
  *
  * @param ctx Listener structure.
@@ -81,8 +87,9 @@ static bool fas_ctx_alive(const struct fas_ctx *ctx)
 static void fas_ctx_arm(struct fas_ctx *ctx, u64 ticks)
 {
 	u64 ns = fas_ticks_to_ns(ticks);
+	u64 slack = min_t(u64, ns >> 4, FAS_WD_SLACK_MAX_NS);
 
-	hrtimer_start_range_ns(&ctx->wd, ns_to_ktime(ns), ns >> 4,
+	hrtimer_start_range_ns(&ctx->wd, ns_to_ktime(ns), slack,
 			       FAS_TIMER_MODE);
 }
 
