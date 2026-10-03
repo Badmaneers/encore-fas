@@ -74,7 +74,7 @@ The target list specifies acceptable target frame rates configured by the daemon
 - **Rate Count:** Accepts 1 to 8 target rates (range: 1 to 1000 FPS per entry).
 - **Separation:** Adjacent target periods must differ by at least 12%. Duplicate rates or close intervals (e.g., `{60, 63}`) are rejected.
 - **Health Criteria:** Operating at any configured target rate is treated as healthy. For games with a fixed lock, provide a single-element list.
-- **VSync Synchronization (`vsync_ns`):** Specifies the display vsync period in nanoseconds. If set to `0`, defaults to the period of the fastest configured target. Explicit configuration is recommended when display refresh rate exceeds the maximum target FPS.
+- **VSync Synchronization (`vsync_ns`):** Specifies the display vsync period in nanoseconds. If set to `0`, defaults to the period of the fastest configured target.
 - **Lockdown Mode (`FAS_CFG_LOCK_DOWN`):** Disables automatic downswitching. If enabled, a frame rate drop (e.g., 60 FPS down to 30 FPS) will remain flagged as degraded.
 
 ### Event Stream

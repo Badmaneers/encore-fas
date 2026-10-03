@@ -207,7 +207,7 @@ static void t_reciprocal(u64 freq)
 
 static void t_healthy(u64 freq)
 {
-	struct { double sig, vsync; } c[] = { { 0.3, 16.667 }, { 1.0, 8.333 },
+	struct { double sig, vsync; } c[] = { { 0.3, (1000.0 / 60) }, { 1.0, (1000.0 / 120) },
 					      { 2.0, 8.333 } };
 	u32 fps[] = { 60 };
 	unsigned i;
@@ -259,7 +259,7 @@ static void t_margin_cap(u64 freq)
 		}
 		tpush(&TR, t);
 	}
-	run_trace(&RN, &TR, freq, fps, 1, 16.667, false, 0);
+	run_trace(&RN, &TR, freq, fps, 1, (1000.0 / 60), false, 0);
 
 	for (k = 0; k < ninj; k++) {
 		u64 t = to_ticks(&RN, TR.ns[inj[k]]);
@@ -302,7 +302,7 @@ static void t_hitches(u64 freq)
 					t += delays[j] * 1e6;
 				tpush(&TR, t);
 			}
-		run_trace(&RN, &TR, freq, fps, 1, 16.667, false, 0);
+		run_trace(&RN, &TR, freq, fps, 1, (1000.0 / 60), false, 0);
 		small = count(&RN, FAS_EVENT_SMALL_JANK, 0, ~0ULL);
 		big = count(&RN, FAS_EVENT_BIG_JANK, 0, ~0ULL);
 		soft = count(&RN, FAS_EVENT_BOOST_SOFT, 0, ~0ULL);
@@ -341,7 +341,7 @@ static void t_deficit(u64 freq)
 		seg(&TR, 5, 1000.0 / 60, 1000.0 / 60, 0.3);
 		onset = TR.ns[TR.n - 1];
 		seg(&TR, 10, 1000.0 / fx[j], 1000.0 / fx[j], 0.3);
-		run_trace(&RN, &TR, freq, fps, 1, 16.667, false, 0);
+		run_trace(&RN, &TR, freq, fps, 1, (1000.0 / 60), false, 0);
 		lat = first_ms(&RN, FAS_EVENT_DEGRADED, onset);
 		if (verbose)
 			printf("deficit %2.0f fps (%.1f%%): degraded after %.0f ms\n", fx[j],
@@ -353,7 +353,7 @@ static void t_deficit(u64 freq)
 	TR.n = 0;
 	TR.nominal = 0;
 	seg(&TR, 60, 1000.0 / 60, 1000.0 / 60 * 1.03, 0.3);
-	run_trace(&RN, &TR, freq, fps, 1, 16.667, false, 0);
+	run_trace(&RN, &TR, freq, fps, 1, (1000.0 / 60), false, 0);
 	CHECK(count(&RN, FAS_EVENT_DEGRADED, 0, ~0ULL) == 0,
 	      "a 3 percent deficit must stay inside the tolerance");
 
@@ -367,7 +367,7 @@ static void t_deficit(u64 freq)
 		seg(&TR, 5, 1000.0 / 60, 1000.0 / 60, 0.3);
 		onset = TR.ns[TR.n - 1];
 		seg(&TR, 30, 1000.0 / 60, 2000.0 / 60, 0.3);
-		run_trace(&RN, &TR, freq, fps, 1, 16.667, false, 0);
+		run_trace(&RN, &TR, freq, fps, 1, (1000.0 / 60), false, 0);
 		p = 1000.0 / 60 + (1000.0 / 60) * first_ms(&RN, FAS_EVENT_DEGRADED, onset) / 30000.0;
 		if (verbose)
 			printf("ramp 60 to 30 fps: degraded at period %.1f ms\n", p);
@@ -388,7 +388,7 @@ static void t_rates(u64 freq)
 	seg(&TR, 3, 1000.0 / 120, 1000.0 / 120, 0.2);
 	onset = TR.ns[TR.n - 1];
 	seg(&TR, 10, 1000.0 / 60, 1000.0 / 60, 0.2);
-	run_trace(&RN, &TR, freq, fps, 3, 8.333, false, 0);
+	run_trace(&RN, &TR, freq, fps, 3, (1000.0 / 120), false, 0);
 	down = first_ms(&RN, FAS_EVENT_RATE_SWITCH, onset);
 	dg = first_ms(&RN, FAS_EVENT_DEGRADED, onset);
 	if (verbose)
@@ -396,7 +396,7 @@ static void t_rates(u64 freq)
 	CHECK(dg > 0 && dg < 200, "degraded %.0f", dg);
 	CHECK(down > 900 && down < 1400, "switch down %.0f", down);
 
-	run_trace(&RN, &TR, freq, fps, 3, 8.333, true, 0);
+	run_trace(&RN, &TR, freq, fps, 3, (1000.0 / 120), true, 0);
 	CHECK(count(&RN, FAS_EVENT_RATE_SWITCH, onset, ~0ULL) == 0, "lock switched");
 	CHECK(count(&RN, FAS_EVENT_DEGRADED, onset, ~0ULL) == 1, "lock degraded");
 
@@ -406,7 +406,7 @@ static void t_rates(u64 freq)
 	seg(&TR, 3, 1000.0 / 60, 1000.0 / 60, 0.2);
 	onset = TR.ns[TR.n - 1];
 	seg(&TR, 10, 1000.0 / 120, 1000.0 / 120, 0.2);
-	run_trace(&RN, &TR, freq, fps, 3, 8.333, false, 0);
+	run_trace(&RN, &TR, freq, fps, 3, (1000.0 / 120), false, 0);
 	up = first_ms(&RN, FAS_EVENT_RATE_SWITCH, onset);
 	if (verbose)
 		printf("60->120: switch +%.0f ms\n", up);
@@ -427,7 +427,7 @@ static void t_pause_recover(u64 freq)
 	last = TR.ns[TR.n - 1];
 	TR.nominal += 3000e6;
 	seg(&TR, 3, 1000.0 / 60, 1000.0 / 60, 0.3);
-	run_trace(&RN, &TR, freq, fps, 1, 16.667, false, 0);
+	run_trace(&RN, &TR, freq, fps, 1, (1000.0 / 60), false, 0);
 	soft = first_ms(&RN, FAS_EVENT_BOOST_SOFT, last);
 	hard = first_ms(&RN, FAS_EVENT_BOOST_HARD, last);
 	paused = first_ms(&RN, FAS_EVENT_PAUSED, last);
@@ -451,7 +451,7 @@ static void t_pause_recover(u64 freq)
 		seg(&TR, 5, 20, 20, 0.3);
 		onset = TR.ns[TR.n - 1];
 		seg(&TR, 10, 1000.0 / 60, 1000.0 / 60, 0.3);
-		run_trace(&RN, &TR, freq, fps, 1, 16.667, false, 0);
+		run_trace(&RN, &TR, freq, fps, 1, (1000.0 / 60), false, 0);
 		soft = first_ms(&RN, FAS_EVENT_RECOVERED, onset);
 		if (verbose)
 			printf("recovery: %.0f ms\n", soft);
@@ -473,7 +473,7 @@ static void t_acquire(u64 freq)
 		TR.n = 0;
 		TR.nominal = 0;
 		seg(&TR, 10, 1000.0 / gr[j], 1000.0 / gr[j], 0.3);
-		run_trace(&RN, &TR, freq, fps, 2, 16.667, false, 0);
+		run_trace(&RN, &TR, freq, fps, 2, (1000.0 / 60), false, 0);
 		for (i = 0; i < RN.n; i++)
 			if (RN.e[i].type == FAS_EVENT_RATE_SWITCH) {
 				got = (int)RN.e[i].fps;
@@ -500,7 +500,7 @@ static void t_skew(u64 freq)
 		TR.ns[i] = TR.ns[i + 1];
 		TR.ns[i + 1] = tmp;
 	}
-	run_trace(&RN, &TR, freq, fps, 1, 16.667, false, 0);
+	run_trace(&RN, &TR, freq, fps, 1, (1000.0 / 60), false, 0);
 	/*
 	 * Swapping timestamps produces one small hitch from a double period interval.
 	 * Late timestamps must not trigger pause or big hitch events.
@@ -537,6 +537,14 @@ static void t_setup(u64 freq)
 	CHECK(fas_det_setup(&c, &h, freq, nine, 9, 0, false) == -EINVAL, "nine rates");
 	CHECK(fas_det_setup(&c, &h, freq, ok, 0, 0, false) == -EINVAL, "empty list");
 	CHECK(fas_det_setup(&c, &h, freq, ok, 3, freq / 100000, false) == -EINVAL, "tiny vsync");
+	{
+		u32 f60[] = { 60 };
+		u64 p60 = (freq + 30) / 60;
+
+		CHECK(!fas_det_setup(&c, &h, freq, f60, 1, p60, false), "vsync equals period");
+		CHECK(fas_det_setup(&c, &h, freq, f60, 1, p60 + 1, false) == -EINVAL, "vsync above period");
+		CHECK(fas_det_setup(&c, &h, freq, f60, 1, freq / 30, false) == -EINVAL, "30 Hz vsync with 60 fps");
+	}
 }
 
 int main(int argc, char **argv)

@@ -319,6 +319,7 @@ static inline void fas_det_set_active(struct fas_cfg *c, u32 idx)
  * @param fps Array of frame rate targets.
  * @param count Number of frame rate targets (1 to FAS_MAX_TARGETS).
  * @param vsync Display vsync period in ticks, or 0 for fastest target period.
+ *              A value longer than the fastest target period is rejected.
  * @param lock_down Set to true to disable switching to lower frame rates.
  * @return 0 on success, or -EINVAL if arguments are invalid.
  */
@@ -354,7 +355,8 @@ static int fas_det_setup(struct fas_cfg *c, struct fas_hot *h, u64 freq,
 			return -EINVAL;
 	}
 
-	if (vsync && (vsync < freq / 1000 || vsync > freq / 10))
+	if (vsync && (vsync < freq / 1000 || vsync > freq / 10 ||
+		      vsync > tmp.tgt[0].period))
 		return -EINVAL;
 
 	tmp.count = count;
