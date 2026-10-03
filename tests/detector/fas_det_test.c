@@ -227,10 +227,7 @@ static void t_healthy(u64 freq)
 		if (verbose)
 			printf("healthy sigma=%.1fms vsync=%.2fms 15min: %d false events\n",
 			       c[i].sig, c[i].vsync, bad);
-		/*
-		 * Quantile margin target causes expected false events during warmup.
-		 * Margin holds false hitch rates stable for arbitrary noise distributions.
-		 */
+		/* The scale follows the noise, so a few false events are expected. */
 		CHECK(bad <= 100, "false events %d", bad);
 		CHECK(count(&RN, FAS_EVENT_DEGRADED, 0, ~0ULL) == 0, "false degraded");
 	}
@@ -277,6 +274,53 @@ static void t_margin_cap(u64 freq)
 		       ninj);
 	CHECK(ninj > 100 && hit * 100 >= ninj * 90,
 	      "reported %d of %d one-slot hitches", hit, ninj);
+}
+
+static void t_scale_decay(u64 freq)
+{
+	enum { NINJ = 80 };
+	u32 fps[] = { 60 };
+	int inj[NINJ], ninj = 0, i, k, hit = 0;
+	double p = 1000.0 / 60;
+	double next = 150000.0;
+
+	rng_state = 8100;
+	TR.n = 0;
+	TR.nominal = 0;
+	for (i = 0; TR.nominal < 300000.0 * 1e6 && TR.n < MAXF - 1; i++) {
+		double ms = TR.nominal / 1e6;
+		bool noisy = ms >= 60000.0 && ms < 120000.0;
+		double t;
+
+		TR.nominal += p * 1e6;
+		t = TR.nominal + gauss() * (noisy ? 3.0 : 0.3) * 1e6;
+		if (noisy && urand() < 0.15)
+			t += -log(urand()) * 10e6;
+		if (ms >= next && ninj < NINJ) {
+			TR.nominal += 10e6;
+			t += 10e6;
+			inj[ninj++] = TR.n;
+			next += 1900.0;
+		}
+		tpush(&TR, t);
+	}
+	run_trace(&RN, &TR, freq, fps, 1, 1000.0 / 60, false, 0);
+	for (k = 0; k < ninj; k++) {
+		u64 t = to_ticks(&RN, TR.ns[inj[k]]);
+
+		for (i = 0; i < RN.n; i++)
+			if ((RN.e[i].type == FAS_EVENT_SMALL_JANK ||
+			     RN.e[i].type == FAS_EVENT_BIG_JANK) &&
+			    RN.e[i].t == t) {
+				hit++;
+				break;
+			}
+	}
+	if (verbose)
+		printf("after noisy minute: %d of %d 10 ms hitches reported\n",
+		       hit, ninj);
+	CHECK(ninj >= 70 && hit * 100 >= ninj * 90,
+	      "reported %d of %d hitches 30 s after a noisy period", hit, ninj);
 }
 
 static void t_hitches(u64 freq)
@@ -563,6 +607,7 @@ int main(int argc, char **argv)
 		t_reciprocal(freq);
 		t_healthy(freq);
 		t_margin_cap(freq);
+		t_scale_decay(freq);
 		t_hitches(freq);
 		t_deficit(freq);
 		t_rates(freq);

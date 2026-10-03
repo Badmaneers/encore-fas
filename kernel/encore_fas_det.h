@@ -31,44 +31,44 @@
 #define FAS_MIN_RATIO_PCT 112
 
 /*
- * Multiplier for fallback margin in mean absolute deviations.
- * Used before the quantile tracker has sufficient samples.
+ * The margin follows a decaying scale s of the frame deviation |d - c|. For
+ * each normal interval, s grows by 2^-FAS_SCALE_UP_SHIFT if the deviation is
+ * above s. Otherwise s shrinks by 2^-FAS_SCALE_DOWN_SHIFT. In equilibrium, s is
+ * the 1 - 1 / (1 + 2^(DOWN - UP)) quantile of |d - c|, which is 0.94 for the
+ * default values. A step is a fixed part of s, so one large interval changes s
+ * by at most 2^-FAS_SCALE_UP_SHIFT.
+ *
+ * s falls by a factor of e in about 2^FAS_SCALE_DOWN_SHIFT quiet frames. A
+ * noisy period does not keep the margin high. The margin is
+ * FAS_SCALE_MULT * s before the limits of fas_margin() apply.
  */
-#ifndef FAS_NOISE_MULT
-#define FAS_NOISE_MULT 6
+#ifndef FAS_SCALE_UP_SHIFT
+#define FAS_SCALE_UP_SHIFT 3
+#endif
+#ifndef FAS_SCALE_DOWN_SHIFT
+#define FAS_SCALE_DOWN_SHIFT 7
+#endif
+#ifndef FAS_SCALE_MULT
+#define FAS_SCALE_MULT 3
 #endif
 
-/*
- * Margin tracks the FAS_QUANT_NUM/FAS_QUANT_DEN quantile of frame lateness
- * using a fixed-step Robbins-Monro update. This holds the false hitch rate
- * stable for any noise distribution.
- */
-#define FAS_QUANT_NUM 1999
-#define FAS_QUANT_DEN 2000
-
-/* Right shift value to calculate step size from mean absolute deviation. */
-#define FAS_QUANT_STEP_SHIFT 2
+/* Smallest value of the scale, in Q16 ticks (one sixteenth of a tick). */
+#define FAS_SCALE_MIN_Q (FAS_Q_ONE >> 4)
 
 /*
  * The hitch margin H never exceeds ref * (1 - 2^-FAS_MARGIN_CAP_SHIFT), which
  * is 0.75 * ref by default.
  *
- * The quantile tracker only sees frames below ref + H. Jank that stays below
- * that threshold is learned as noise, which raises the quantile and H until
- * H reaches its old cap, ref. At H = ref a single missed frame slot (interval
- * 2P) sits on the threshold, and jitter decides whether it is reported. With
- * this cap the threshold stays below 1.75 * ref, so a missed slot is always
- * reported. H is still at least V / 2. Use a larger shift for a higher cap.
+ * The scale only sees frames below ref + H. Jank that stays below that
+ * threshold is learned as noise, which raises the scale and H until H reaches
+ * its old cap, ref. At H = ref a single missed frame slot (interval 2P) sits on
+ * the threshold, and jitter decides whether it is reported. With this cap the
+ * threshold stays below 1.75 * ref, so a missed slot is always reported. H is
+ * still at least V / 2. Use a larger shift for a higher cap.
  */
 #ifndef FAS_MARGIN_CAP_SHIFT
 #define FAS_MARGIN_CAP_SHIFT 2
 #endif
-
-/*
- * Required count of normal frames before using adaptive quantile values.
- * Warmup needs several thousand frames to collect sufficient sample data.
- */
-#define FAS_QUANT_WARMUP 4096
 
 #define FAS_WIN_PERIODS 8
 #define FAS_OK_WINDOWS 2
@@ -136,16 +136,12 @@ struct fas_hot {
 	u64 win_start;
 	/** Moving average frame period, multiplied by 16. */
 	u64 cadence_q4;
-	/** Moving mean absolute deviation, multiplied by 16. */
-	u64 dev_q4;
-	/** Tracked quantile of frame deviation in Q16 ticks. */
-	u64 quant_q;
+	/** Decaying scale of frame deviation in Q16 ticks. */
+	u64 scale_q;
 	/** Accumulated CUSUM deficit in Q16 format. */
 	s64 cusum_q;
 	/** Frame count in current window. */
 	u32 win_n;
-	/** Count of normal updates, capped at FAS_QUANT_WARMUP. */
-	u16 quant_n;
 	/** Set to 1 when first frame is recorded. */
 	u8 have_last;
 	/** Set to 1 while initial target rate is selected. */
@@ -217,8 +213,7 @@ static __always_inline u64 fas_ref(const struct fas_cfg *c,
 /**
  * @brief Calculates hitch threshold margin.
  *
- * Uses tracked deviation quantile if sufficient samples exist.
- * Falls back to fixed multiple of mean absolute deviation during warmup.
+ * Uses FAS_SCALE_MULT times the decaying deviation scale.
  * The result is at least V / 2 and at most 0.75 * ref (see FAS_MARGIN_CAP_SHIFT).
  *
  * @param c Configuration settings.
@@ -229,9 +224,7 @@ static __always_inline u64 fas_ref(const struct fas_cfg *c,
 static __always_inline u64 fas_margin(const struct fas_cfg *c,
 				      const struct fas_hot *h, u64 ref)
 {
-	u64 adaptive = h->quant_n >= FAS_QUANT_WARMUP ?
-			       h->quant_q >> FAS_Q :
-			       (h->dev_q4 * FAS_NOISE_MULT) >> 4;
+	u64 adaptive = (h->scale_q * FAS_SCALE_MULT) >> FAS_Q;
 	u64 cap = max_t(u64, c->vsync >> 1, ref - (ref >> FAS_MARGIN_CAP_SHIFT));
 
 	adaptive = max_t(u64, c->vsync >> 1, adaptive);
@@ -370,6 +363,7 @@ static int fas_det_setup(struct fas_cfg *c, struct fas_hot *h, u64 freq,
 	*c = tmp;
 	memset(h, 0, sizeof(*h));
 	h->acquiring = 1;
+	h->scale_q = div_u64((c->vsync >> 1) << FAS_Q, FAS_SCALE_MULT);
 	h->pending = FAS_NONE;
 	h->wd_stage = FAS_WD_IDLE;
 	return 0;
@@ -560,37 +554,24 @@ static noinline void fas_det_resync(struct fas_hot *h, const struct fas_cfg *c,
 }
 
 /*
- * Updates cadence, deviation, and lateness quantile.
+ * Updates cadence and deviation scale.
  *
- * Quantile tracks frame lateness relative to cadence using a Robbins-Monro
- * update rule. Step size adjusts based on deviation to maintain reliable
- * hitch detection across different frame rates.
+ * The scale moves by a fixed part of its value, up or down, so one large
+ * interval has a limited effect. The scale decays when frames are quiet.
  */
-static __always_inline void fas_det_noise_update(struct fas_hot *h,
-						 const struct fas_cfg *c,
-						 u64 delta)
+static __always_inline void fas_det_noise_update(struct fas_hot *h, u64 delta)
 {
 	u64 cadence = h->cadence_q4 >> 4;
-	u64 a = h->dev_q4 >> 4;
-	u64 dev = min_t(u64, fas_abs_diff(delta, cadence), c->vsync);
-	u64 late_q = (delta > cadence ? delta - cadence : 0) << FAS_Q;
-	u64 step_q = max_t(u64, 1, (a << FAS_Q) >> FAS_QUANT_STEP_SHIFT);
+	u64 dev_q = fas_abs_diff(delta, cadence) << FAS_Q;
+	u64 s = h->scale_q;
 
-	h->dev_q4 = (u64)((s64)h->dev_q4 +
-			  ((((s64)dev << 4) - (s64)h->dev_q4) >> 4));
 	h->cadence_q4 = (u64)((s64)h->cadence_q4 +
 			      ((((s64)delta << 4) - (s64)h->cadence_q4) >> 3));
-
-	if (late_q > h->quant_q) {
-		h->quant_q += div_u64(step_q * FAS_QUANT_NUM, FAS_QUANT_DEN);
-	} else {
-		u64 down = div_u64(step_q * (FAS_QUANT_DEN - FAS_QUANT_NUM),
-				   FAS_QUANT_DEN);
-
-		h->quant_q -= min_t(u64, h->quant_q, down);
-	}
-	if (h->quant_n < FAS_QUANT_WARMUP)
-		h->quant_n++;
+	if (dev_q > s)
+		s += max_t(u64, 1, s >> FAS_SCALE_UP_SHIFT);
+	else
+		s -= max_t(u64, 1, s >> FAS_SCALE_DOWN_SHIFT);
+	h->scale_q = max_t(u64, s, FAS_SCALE_MIN_Q);
 }
 
 /**
@@ -667,7 +648,7 @@ static u64 fas_det_frame(struct fas_hot *h, struct fas_cfg *c, u64 now,
 	if (unlikely(delta >= ref + margin))
 		fas_det_hitch(h, c, delta, ref, margin, flags, out);
 	else
-		fas_det_noise_update(h, c, delta);
+		fas_det_noise_update(h, delta);
 
 	if (likely(!h->degraded) && fas_det_cusum(h, c, delta)) {
 		fas_emit(c, out, FAS_EVENT_DEGRADED, 0, 0, delta);

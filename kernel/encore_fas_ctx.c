@@ -23,7 +23,7 @@ struct fas_ctx {
 	raw_spinlock_t lock ____cacheline_aligned;
 	/** Thread group ID of target process. The handler compares it to current. */
 	u32 tgid;
-	/** Detector state. Lock, @tgid, and this member span two cache lines. */
+	/** Detector state. Lock, @tgid, and this member fill one cache line. */
 	struct fas_hot hot;
 
 	/** Listener ID used by daemon. */
@@ -260,10 +260,10 @@ void fas_ctx_init(void)
 
 	BUILD_BUG_ON(sizeof(struct fas_register_args) != 320);
 	BUILD_BUG_ON(sizeof(struct fas_config) != 48);
-	BUILD_BUG_ON(sizeof(struct fas_hot) != 72);
+	BUILD_BUG_ON(sizeof(struct fas_hot) != 56);
 #if L1_CACHE_BYTES == 64 && !defined(CONFIG_DEBUG_SPINLOCK) && \
 	!defined(CONFIG_LOCKDEP)
-	BUILD_BUG_ON(offsetof(struct fas_ctx, id) != 2 * L1_CACHE_BYTES);
+	BUILD_BUG_ON(offsetof(struct fas_ctx, id) != L1_CACHE_BYTES);
 #endif
 
 	for (i = 0; i < FAS_MAX_LISTENERS; i++)

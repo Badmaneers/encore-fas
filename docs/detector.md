@@ -48,16 +48,13 @@ The file encore_fas_det.h contains the primary source code.
 | $P$ | Period of the active target, $P_A$ | ticks |
 | $V$ | Vsync period | ticks |
 | $c$ | Moving average of the interval | ticks |
-| $a$ | Moving mean absolute deviation of the interval | ticks |
 | $R$ | Reference interval | ticks |
 | $H$ | Margin | ticks |
 | $m_i$ | Missed slots of interval $i$ | count |
 | $x_i$ | Normalized excess of interval $i$ | Q16 |
 | $S$ | CUSUM value | Q16 |
-| $q$ | Tracked quantile of the interval's one-sided lateness | ticks, Q16 |
-| $\tau$ | Target quantile of $q$, 0.9995 | ratio |
-| $\gamma$ | Quantile step size, $a / 4$ | ticks, Q16 |
-| $late$ | One-sided lateness, $\max(d-c,\ 0)$ | ticks |
+| $s$ | Decaying scale of the interval deviation $\lvert d - c \rvert$ | ticks, Q16 |
+| $K$ | Margin multiplier of $s$, 3 | ratio |
 | $\epsilon$ | Tolerance, 0.05 | ratio |
 | $h$ | CUSUM alarm limit, 1.0 | ratio |
 | $W$ | Window length | ticks |
@@ -142,9 +139,7 @@ New configurations preserve the event sequence counter `seq`.
 | `acquiring` | Set to 1 while selecting initial target rate. |
 | `win_start`, `win_n` | Start timestamp and interval count of current window. |
 | `c_q4` | Moving average interval scaled by 16 ($16c$). |
-| `a_q4` | Moving mean absolute deviation scaled by 16 ($16a$). |
-| `q` | Quantile threshold value in Q16 format. |
-| `q_n` | Normal update count for quantile tracker (maximum `FAS_QUANT_WARMUP`). |
+| `scale_q` | Decaying deviation scale $s$ in Q16 format. |
 | `S` | CUSUM deficit metric in Q16 format. |
 | `degraded` | Set to 1 when frame rate is below active target. |
 | `paused` | Set to 1 when watchdog detects frame pause. |
@@ -216,7 +211,7 @@ The detector executes this procedure for each frame timestamp $t$. The function 
    3. Execute acquisition procedure (Section 7). Return $T_{soft}$.
 6. Set `FAS_EVF_WATCHDOG` event flag if `wd_stage` is not `ARMED`. Set `wd_stage` to `ARMED`.
 7. Calculate $R$ and $H$ (Section 8).
-8. If $d \ge R + H$, execute hitch procedure (Section 9). Otherwise update $c$ and $a$ (Section 8.3).
+8. If $d \ge R + H$, execute hitch procedure (Section 9). Otherwise update $c$ and $s$ (Section 8.3).
 9. If `degraded` equals 0, add $d$ to CUSUM (Section 10). If CUSUM reaches alarm threshold, emit `DEGRADED`, set `degraded` to 1, and set $S$ to 0.
 10. Increment `win_n`. If $t - \texttt{win\_start} \ge W$, execute window procedure (Section 12).
 11. Return $T_{soft}$ based on updated state parameters.
@@ -253,76 +248,53 @@ $R$ tracks recent frame intervals. Values are clamped between $P$ and $2P$. Defi
 ### 8.2 Margin
 
 $$
-H = \min\bigl(\max(V / 2,\ q),\ R\bigr)
+H = \min\bigl(\max(V / 2,\ K s),\ \max(V / 2,\ 0.75 R),\ R\bigr)
 $$
 
 1. Minimum threshold $V / 2$ represents half a vsync frame duration.
-2. Parameter $q$ (Section 8.4) tracks the $\tau$ quantile of frame lateness. This maintains stable false hitch rates across arbitrary noise distributions.
-3. Maximum cap $R$ keeps hitch detection threshold below $2R$.
+2. Parameter $s$ (Section 8.4) is a decaying scale of the frame deviation. $K = 3$ (`FAS_SCALE_MULT`).
+3. Maximum cap $0.75R$ keeps the hitch detection threshold below $1.75R$, so a single missed slot (interval $2P$) is always reported. When $V / 2$ is larger than $0.75R$, the cap is $V / 2$. In all cases $H \le R$.
 
-Before collecting `FAS_QUANT_WARMUP` normal samples, the detector uses fallback margin $\min(\max(V/2,\ Na),\ R)$ with multiplier $N = 6$. Warmup requires several thousand samples to stabilize $q$ values after registration or target switches.
+There is no warmup period. Setup initializes $s$ so that $K s = V / 2$, and $s$ adapts from the first normal frame.
 
 ### 8.3 Update
 
-The detector updates cadence $c$ and deviation $a$ using normal frames only. It calculates deviation using $c$ prior to updating:
+The detector updates cadence $c$ and scale $s$ using normal frames only. It calculates deviation using $c$ prior to updating:
 
 $$
-dev = \min(\lvert d - c \rvert,\ V)
-$$
-
-$$
-a \leftarrow a + \frac{dev - a}{16}
+dev = \lvert d - c \rvert
 \qquad
 c \leftarrow c + \frac{d - c}{8}
 $$
 
-Cap value $V$ prevents catch-up frames from distorting moving deviation averages.
+Initial parameters: Target switches and resync reset $c = P$. Setup initializes $s = V / (2K)$. Target switches and resync preserve $s$.
 
-Initial parameters: Target switches and resync reset $c = P$. Setup initializes $a = 0$. Target switches preserve $a$.
+### 8.4 Decaying Scale
 
-### 8.4 Quantile Tracker
-
-Quantile parameter $q$ directly tracks the $\tau$ quantile of upper frame lateness $late$:
+Scale $s$ moves by a fixed part of its own value on each normal frame:
 
 $$
-late = \max(d - c,\ 0)
-$$
-
-Lateness $late$ measures positive delay above average cadence. Flooring negative differences at zero prevents post-hitch catch-up intervals from artificially increasing noise deviation estimates.
-
-Quantile $q$ updates on each normal frame via Robbins-Monro approximation:
-
-$$
-\gamma = \frac{a}{2^{2}}
-$$
-
-$$
-q \leftarrow
+s \leftarrow
 \begin{cases}
-q + \gamma \tau & late > q \\
-q - \gamma (1 - \tau) & late \le q
+s + \max(s \cdot 2^{-3},\ 1) & dev > s \\
+s - \max(s \cdot 2^{-7},\ 1) & dev \le s
 \end{cases}
-\qquad \tau = 0.9995
 $$
 
-Step size $\gamma$ scales with deviation $a$. This provides consistent step sizing across different target frame rates.
+The result has a lower limit of $1/16$ tick. The shifts are `FAS_SCALE_UP_SHIFT = 3` and `FAS_SCALE_DOWN_SHIFT = 7`.
 
-**Quantile Convergence.** At target quantile $\tau$, sample proportions at or below threshold equal $\tau$ while exceedances equal $1 - \tau$. The expected step value equals zero:
+**Equilibrium.** The up and down steps are equal in expectation when $P(dev > s) \cdot 2^{-3} = P(dev \le s) \cdot 2^{-7}$. This gives $P(dev > s) = 1/17$, so $s$ follows the 0.94 quantile of $dev$ for any interval distribution. Equal shifts would give the median. In simulation, a median scale did not reach the same false hitch rate on heavy-tailed jitter even with $K = 14$, and it raised the margin on moderate jitter.
 
-$$
-E[\Delta q] = (1 - \tau) \cdot \gamma \tau + \tau \cdot \bigl(-\gamma (1 - \tau)\bigr) = 0
-$$
+**Bounded influence.** A step is a fixed part of $s$. One large interval changes $s$ by at most $2^{-3}$ (12.5%), regardless of its size. Frames that cause a hitch event do not update $s$.
 
-The update equilibrium holds for any interval distribution.
+**Decay.** In quiet periods $s$ falls by a factor of $e$ in about 128 frames, which is 2 seconds at 60 fps. After a noisy period the margin returns to its floor within a few seconds.
 
-**Tracking Behavior.** Fixed step sizes oscillate around equilibrium, stepping up by $\gamma \tau$ on exceedances and stepping down by $\gamma (1 - \tau)$ otherwise. Over long runs, realized hitch rates match nominal target $1 - \tau$. Test sweeps across 25 random seeds verified average `SMALL_JANK` counts match nominal targets within 10% to 15%. Target quantile $\tau = 0.9995$ provides margin stability across variable test trace distributions.
+**Trade-offs.**
 
-**Trade-offs.** Non-parametric quantile tracking introduces two specific requirements:
+1. The false hitch rate depends on the jitter distribution. The scale follows the bulk of the noise. On heavy-tailed jitter (10% of frames late by an exponential with a mean of 8 ms), the detector reports about 70 false hitches per minute at 60 fps. A hitch rate signal is the correct way to handle this case.
+2. The margin changes within seconds. If noise comes in short bursts, the margin falls between bursts and the detector reports the jank inside the bursts.
 
-1. **Warmup Period.** Exceedances occur once per $1 / (1 - \tau)$ normal frames. The tracker requires `FAS_QUANT_WARMUP` (4096 frames) to establish stable threshold estimates. Section 8.2 uses fallback margin $Na$ during warmup.
-2. **Step Sizing.** Parameter $\gamma$ balances adaptation speed against threshold variance. Shift value `FAS_QUANT_STEP_SHIFT = 2` balances rapid response against run-to-run threshold stability.
-
-Quantile $q$ persists across rate switches and resync calls, maintaining rendering pipeline noise estimates.
+Scale $s$ persists across rate switches and resync calls.
 
 ## 9. Hitch Detector
 
@@ -543,15 +515,14 @@ $$
 3. Moving average calculations use signed 64-bit arithmetic right shifts:
 
 ```c
-dev_q4 += ((dev << 4) - dev_q4) >> 4;
-c_q4   += ((d   << 4) - c_q4)   >> 3;
+c_q4 += ((d << 4) - c_q4) >> 3;
 ```
 
 4. Arithmetic right shifts preserve sign bits for negative values (guaranteed by Linux kernel).
 5. Evaluated intervals stay below $T_{pause}$. For $F \le 4$ GHz and 1 fps target, $T_{pause} = 4 \times 10^{10}$ ticks. 16-bit shifts prevent 64-bit integer overflow. CUSUM products remain $\le 2^{48}$.
 6. Tick-to-nanosecond conversions use fixed multiplier and shift values, capping input durations at 60 s.
 7. System counter frequency $F$ reads `CNTFRQ_EL0`. Out-of-range or inaccurate values fall back to measured hardware frequencies rounded up to 10 kHz.
-8. Quantile parameter $q$ and step size $\gamma$ use Q16 format matching CUSUM metrics. Parameter $\gamma = a / 4$ remains within overflow limits since $a \le V \le 2P$.
+8. Scale $s$ uses Q16 format matching CUSUM metrics. Each step uses a right shift of $s$, with a minimum of 1. The product $K s$ stays within 64 bits since $s \le d_{max} \cdot 2^{16}$ and $d_{max} < T_{pause}$.
 
 ## 16. Concurrency Model
 
@@ -568,10 +539,10 @@ c_q4   += ((d   << 4) - c_q4)   >> 3;
 | ----- | ----- | ----- | ----- |
 | `FAS_TOL_PCT` ($\epsilon$) | 5 | % of $P$ | Reduces deficit alarms. Widens target rate bands. Slows recovery. |
 | `FAS_MIN_RATIO_PCT` | 112 | % | Enforces larger separation between target frame rates. |
-| `FAS_NOISE_MULT` ($N$) | 6 | ratio | Increases fallback margin during warmup. Reduces false hitches. |
-| `FAS_QUANT_NUM`/`FAS_QUANT_DEN` ($\tau$) | 1999/2000 | ratio | Higher quantile target reduces false hitch rates after warmup. |
-| `FAS_QUANT_STEP_SHIFT` | 2 | shift | Reduces step size $\gamma$. Slows adaptation to noise changes; reduces threshold variance. |
-| `FAS_QUANT_WARMUP` | 4096 | frames | Extends reliance on fallback margin prior to adaptive quantile activation. |
+| `FAS_SCALE_MULT` ($K$) | 3 | ratio | Increases the margin for a given scale. Reduces false hitches. Reduces detection of small hitches. |
+| `FAS_SCALE_UP_SHIFT` | 3 | shift | Reduces the growth step of $s$. Slows the response to new noise. Lowers the tracked quantile. |
+| `FAS_SCALE_DOWN_SHIFT` | 7 | shift | Reduces the decay step of $s$. Slows the return to a low margin. Raises the tracked quantile. |
+| `FAS_MARGIN_CAP_SHIFT` | 2 | shift | Raises the cap of $H$ toward $R$. A missed slot can sit on the threshold. |
 | `FAS_MISS_BIG` | 3 | slots | Reduces `BIG_JANK` events. Delays `BOOST_HARD` watchdog triggers. |
 | CUSUM upper clip | 0.5 | $P$ | Accelerates deficit alarms from large single hitches. |
 | CUSUM alarm limit $h$ | 1.0 | $P$ | Delays deficit alarm triggers. |
@@ -584,7 +555,6 @@ c_q4   += ((d   << 4) - c_q4)   >> 3;
 | `FAS_PAUSE_PERIODS` | 10 | $P_{n-1}$ | Delays `PAUSED` state detection for low target rates. |
 | `FAS_IDLE_POLL_WINS` | 8 | $W_{min}$ | Slows detection of terminated target processes. |
 | Cadence EWMA weight | 1/8 | ratio | Accelerates cadence adaptation $R$. |
-| Deviation EWMA weight | 1/16 | ratio | Accelerates deviation adaptation $a$. |
 | Reference cap | 2 | $P$ | Increases hitch detection thresholds in degraded states. |
 | `FAS_OUT_MAX` | 4 | events | Increases maximum event capacity per evaluation call. |
 
@@ -592,15 +562,23 @@ c_q4   += ((d   << 4) - c_q4)   >> 3;
 
 ### 18.1 False Hitch Rate
 
-Following tracker warmup (Section 8.4), hitch margin $H$ matches the $\tau$ quantile of upper frame lateness, targeting a false hitch rate of $1 - \tau$ for non-hitch intervals. Quantile tracking maintains target false hitch rates regardless of underlying jitter noise distributions.
-
-The fixed-step Robbins-Monro update tracks quantile $\tau$ with bounded oscillation rather than asymptotic convergence to a point estimate. A decreasing step size would give consistent convergence under stationary noise, but would respond too slowly to workload changes (thermal state, scene complexity, target switches). The constant step size $\gamma$ trades estimator consistency for tracking responsiveness under non-stationary conditions, which matches the target use case. Pre-warmup fallback margin $\min(\max(V/2, Na), R)$ with $N = 6$ assumes Gaussian timestamp jitter with standard deviation $\sigma_t$, yielding interval deviation $\sigma_d = \sqrt{2}\,\sigma_t \approx 1.2533\,a$ and false hitch probability:
+For Gaussian timestamp jitter with standard deviation $\sigma_t$, the interval deviation is $\sigma_d = \sqrt{2}\,\sigma_t$. The scale follows the 0.94 quantile of $\lvert d - c \rvert$, which is $1.88\sigma_d$, so $H = 3s \approx 5.6\sigma_d$ and the false hitch probability is:
 
 $$
-p = Q\!\left(\frac{Na}{\sigma_d}\right)
+p = Q\!\left(\frac{H}{\sigma_d}\right) \approx 10^{-8}
 $$
 
-For $N = 6$, ratio $H / \sigma_d = 4.79$ yields theoretical Gaussian false hitch probability $p = 8.3 \times 10^{-7}$. Non-Gaussian rendering jitter (thermal throttling, scheduler contention, IPC stalls) exhibits heavier tail distributions, motivating direct quantile tracking.
+In practice the floor $V / 2$ is larger than $H$ for $\sigma_t$ below about 1 ms at 60 fps, and the floor sets the rate.
+
+Non-Gaussian rendering jitter (thermal throttling, scheduler contention, IPC stalls) has heavier tails. The scale does not follow the tail, so the false hitch rate rises with tail weight. Simulations at 60 fps with a 0.4 ms Gaussian base:
+
+| Tail | False hitches per minute |
+| ----- | ----- |
+| None | 0 |
+| 3% of frames, exponential mean 4 ms | 13 |
+| 10% of frames, exponential mean 8 ms | 69 |
+
+These values match the previous quantile tracker. The margin does not stay high after a noisy period, so single-slot hitches are reported again within seconds.
 
 ### 18.2 False Deficit Alarm Rate
 
