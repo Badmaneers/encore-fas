@@ -51,7 +51,7 @@ The module tracks four primary types of events and reports them to the userspace
 | `FAS_IOC_REGISTER` | `struct fas_register_args` | Attaches a probe listener to a process; returns a listener ID. |
 | `FAS_IOC_REMOVE` | `struct fas_remove_args` | Detaches a listener. |
 | `FAS_IOC_SET_CONFIG` | `struct fas_config_args` | Updates target frame rates for an active listener. |
-| `FAS_IOC_GET_STATE` | `struct fas_state` | Fetches current state metrics for a listener. |
+| `FAS_IOC_GET_STATE` | `struct fas_state` | Fetches current state metrics for a listener, including the reference interval, hitch margin, and effective vsync period. |
 | `FAS_IOC_LIST` | `struct fas_listener_list` | Enumerates all active listeners. |
 
 `FAS_IOC_REGISTER` requires the target process ID (PID), file path, ELF symbol offset for `Surface::queueBuffer` inside `libgui.so`, and an initial configuration list. The `fas_ctl` CLI utility can resolve symbol offsets automatically.

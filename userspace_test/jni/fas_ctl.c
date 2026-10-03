@@ -178,6 +178,8 @@ static int cmd_state(int fd, int argc, char **argv) {
 
     printf("fps: %u\nacquiring: %d\ndegraded: %d\npaused: %d\npressure: %.3f\nseq: %u\ndropped: %u\n", st.fps, !!(st.flags & FAS_STATE_ACQUIRING),
            !!(st.flags & FAS_STATE_DEGRADED), !!(st.flags & FAS_STATE_PAUSED), st.pressure_q16 / 65536.0, st.seq, st.dropped);
+    printf("ref: %.3f ms\nmargin: %.3f ms\nvsync: %.3f ms\nsoft: %.3f ms\n", st.ref_ns / 1e6, st.margin_ns / 1e6, st.vsync_ns / 1e6,
+           (st.ref_ns + (uint64_t)st.margin_ns) / 1e6);
     return 0;
 }
 

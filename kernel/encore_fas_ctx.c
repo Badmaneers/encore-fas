@@ -260,6 +260,7 @@ void fas_ctx_init(void)
 
 	BUILD_BUG_ON(sizeof(struct fas_register_args) != 320);
 	BUILD_BUG_ON(sizeof(struct fas_config) != 48);
+	BUILD_BUG_ON(sizeof(struct fas_state) != 40);
 	BUILD_BUG_ON(sizeof(struct fas_hot) != 56);
 #if L1_CACHE_BYTES == 64 && !defined(CONFIG_DEBUG_SPINLOCK) && \
 	!defined(CONFIG_LOCKDEP)
@@ -445,6 +446,7 @@ int fas_ctx_get_state(struct fas_state *state)
 {
 	struct fas_ctx *ctx;
 	unsigned long flags;
+	u64 ref, margin, vsync;
 	s32 id = state->ctx_id;
 
 	memset(state, 0, sizeof(*state));
@@ -464,9 +466,15 @@ int fas_ctx_get_state(struct fas_state *state)
 		       (ctx->hot.paused ? FAS_STATE_PAUSED : 0);
 	state->pressure_q16 = fas_det_pressure(&ctx->hot);
 	state->seq = ctx->hot.seq;
+	ref = fas_ref(&ctx->cfg, &ctx->hot);
+	margin = fas_margin(&ctx->cfg, &ctx->hot, ref);
+	vsync = ctx->cfg.vsync;
 	raw_spin_unlock_irqrestore(&ctx->lock, flags);
 	mutex_unlock(&fas_mutex);
 
+	state->ref_ns = min_t(u64, fas_ticks_to_ns(ref), U32_MAX);
+	state->margin_ns = min_t(u64, fas_ticks_to_ns(margin), U32_MAX);
+	state->vsync_ns = min_t(u64, fas_ticks_to_ns(vsync), U32_MAX);
 	state->dropped = fas_evq_dropped();
 	return 0;
 }

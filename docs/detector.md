@@ -490,7 +490,7 @@ Event timestamps convert timer ticks to nanoseconds upon queue insertion.
 
 1. Listeners share a global event queue holding 512 entries.
 2. Queue overflows discard the oldest event and increment the drop counter.
-3. Sequence gaps in `seq` indicate lost events. Daemons query `FAS_IOC_GET_STATE` to read `fps`, flags (`ACQUIRING`, `DEGRADED`, `PAUSED`), `pressure_q16`, `seq`, and drop counts.
+3. Sequence gaps in `seq` indicate lost events. Daemons query `FAS_IOC_GET_STATE` to read `fps`, flags (`ACQUIRING`, `DEGRADED`, `PAUSED`), `pressure_q16`, `seq`, drop counts, and the current $R$, $H$, and $V$ in nanoseconds (`ref_ns`, `margin_ns`, `vsync_ns`). The soft watchdog fires when no frame arrives for `ref_ns + margin_ns`. `vsync_ns` is the effective value, which is the period of the fastest target if the configured vsync is 0.
 4. `read()` returns up to 8 events per call. User buffer size must accommodate at least one 48-byte event structure; smaller buffers return `-EINVAL`.
 
 ### 14.4 Event Volume

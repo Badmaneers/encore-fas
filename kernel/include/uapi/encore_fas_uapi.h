@@ -6,7 +6,7 @@
 #include <linux/types.h>
 #include <linux/ioctl.h>
 
-#define FAS_ABI_VERSION 2
+#define FAS_ABI_VERSION 3
 
 #define FAS_MAX_PATH_LEN 256
 #define FAS_MAX_TARGETS 8
@@ -97,9 +97,15 @@ struct fas_state {
 	__u32 seq;
 	// Count of dropped events due to full queue.
 	__u32 dropped;
+	// Reference interval of the hitch threshold in nanoseconds.
+	__u32 ref_ns;
+	// Hitch margin in nanoseconds. The soft watchdog fires at ref_ns + margin_ns.
+	__u32 margin_ns;
+	// Effective display vsync period in nanoseconds.
+	__u32 vsync_ns;
 
-	// Reserved fields.
-	__u32 reserved[2];
+	// Reserved field.
+	__u32 reserved;
 };
 
 struct fas_listener_info {

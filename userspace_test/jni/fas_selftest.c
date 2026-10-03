@@ -191,7 +191,7 @@ static void begin(struct scenario *s, const uint32_t *fps, uint32_t count, uint3
 
 static void sc_healthy(struct scenario *s) {
     const uint32_t f[] = {60};
-    struct fas_state st;
+    struct fas_state st = {0};
 
     begin(s, f, 1, 60, 0);
     frames(s, 60, 3.0);
@@ -202,6 +202,9 @@ static void sc_healthy(struct scenario *s) {
     check(s, count_type(s, FAS_EVENT_BIG_JANK) == 0, "no big hitch");
     check(s, count_type(s, FAS_EVENT_SMALL_JANK) <= 2, "at most 2 small hitches, got %d", count_type(s, FAS_EVENT_SMALL_JANK));
     check(s, fas_client_get_state(s->fd, s->ctx, &st) == 0 && !(st.flags & FAS_STATE_ACQUIRING) && st.fps == 60, "state after acquisition");
+    check(s, st.vsync_ns >= 16000000u && st.vsync_ns <= 17000000u, "vsync in the state: %u ns", st.vsync_ns);
+    check(s, st.ref_ns >= 16000000u && st.ref_ns <= 34000000u, "ref in the state: %u ns", st.ref_ns);
+    check(s, st.margin_ns + 2000u >= st.vsync_ns / 2 && st.margin_ns <= st.ref_ns, "margin in the state: %u ns", st.margin_ns);
 }
 
 static void sc_hitch(struct scenario *s) {
